@@ -1,0 +1,20 @@
+{
+  "identifier": "default",
+  "description": "Local desktop window and user-selected file dialogs",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-destroy",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-title"
+  ]
+}

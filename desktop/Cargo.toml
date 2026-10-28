@@ -1,0 +1,29 @@
+[package]
+name = "openink-studio"
+version = "0.4.3"
+license = "GPL-2.0-only"
+edition = "2021"
+description = "Local-first pen plotter desktop studio"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+openink-model = { path = "model" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serialport = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+usvg = "0.45"
+ttf-parser = "0.25"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
+[profile.release]
+opt-level = 2

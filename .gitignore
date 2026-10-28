@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Rust build outputs
+target/
+node_modules/
+desktop/ui/dist/
+desktop/gen/
+
+# 工具运行生成的 gcode 输出（如 official_write.py 产物）
+out_*.gcode
+
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+
+# 私有资料可在私有开发仓库跟踪；公开过滤统一由 .gitattributes 和导出审计负责。
+# 迁移前备份不再参与构建。
+desktop/src/legacy_font.rs
+
+# 账户凭证不进入任何仓库。
+.env
+.env.*
+.aws/
+.ssh/
+.npmrc
+.pypirc
+*.pem
+*.p12
+*.pfx

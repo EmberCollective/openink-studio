@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenInk Studio",
+  "version": "0.4.3",
+  "identifier": "local.openink.studio",
+  "build": {
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "ui/dist"
+  },
+  "app": {
+    "windows": [{"title": "OpenInk Studio · 自由书写", "width": 1480, "height": 960, "minWidth": 1100, "minHeight": 740, "decorations": false}],
+    "security": {"csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420"}
+  },
+  "bundle": {"active": true, "fileAssociations": [{"ext": ["inkproj"], "name": "OpenInk 工程包", "description": "OpenInk Studio 工程包", "role": "Editor"}], "targets": ["nsis"], "icon": ["icons/icon.ico", "icons/icon.png"], "resources": ["helpers/*"]}
+}

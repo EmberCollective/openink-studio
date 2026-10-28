@@ -1,0 +1,8 @@
+.canvas-pointer-wrapper { position: relative; flex-shrink: 0; }
+.canvas-pointer-wrapper > .paper { border: 0; outline: 1px solid #e4e6ec; }
+.canvas-pointer-overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.canvas-crosshair-x, .canvas-crosshair-y { position: absolute; opacity: .6; }
+.canvas-crosshair-x { left: 0; right: 0; border-top: 1px dashed #625bd7; }
+.canvas-crosshair-y { top: 0; bottom: 0; border-left: 1px dashed #625bd7; }
+.canvas-pointer-readout { position: absolute; left: 12px; bottom: 10px; z-index: 8; pointer-events: none; background: #fffffff0; border: 1px solid #d9dcec; border-radius: 4px; padding: 4px 7px; color: #46516a; font: 10px/1.5 system-ui, sans-serif; white-space: nowrap; box-shadow: 0 2px 6px #26345012; }
+.canvas-pointer-readout span { display: block; }
