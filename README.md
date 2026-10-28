@@ -1,14 +1,48 @@
-# OpenInk Studio
+<h1 align="center">OpenInk Studio</h1>
 
-**把 PDF、纸张照片和图片变成可编辑的笔迹，再对齐纸面，交给写字机。**
+<p align="center">
+  <img src="./desktop/icons/icon.png" width="112" alt="OpenInk Studio Logo">
+</p>
 
-面向 GRBL 写字机与笔式绘图仪的本地桌面工作台。导入底稿、拟合线路、编辑排版、校准位置和串口书写，在同一个工程里完成。
+<p align="center">
+  <strong>从 PDF、图片和 SVG 到纸面手写。</strong><br>
+  本地桌面排版、纸面对位与 GRBL 写字机控制工作台。
+</p>
 
-`0.4.3` · Windows 开发与验证 · Rust / Tauri 2 / React · [GPL-2.0-only](LICENSE)
+<p align="center">
+  <a href="#界面预览">界面预览</a> ·
+  <a href="#从底稿到纸面">功能</a> ·
+  <a href="#从源码启动">快速开始</a> ·
+  <a href="./CHANGELOG.md">更新日志</a> ·
+  <a href="./docs/README.md">文档</a>
+</p>
 
-公开学习版提供源码，**不提供安装包，不包含原厂 gfont 字库或私有解析库**。
+源码预览 · Windows 开发与验证 · Rust / Tauri 2 / React · [GPL-2.0-only](LICENSE)
+
+公开学习版提供源码，**不提供安装包，不包含原厂 gfont 字库或私有解析库**。当前校准与换页流程仍待实机验收。
+
+## 界面预览
+
+以下为当前前端的浏览器预览，使用自制示例工程；设备未连接。
+
+![多页 PDF 底稿与可编辑的文字轨迹](assets/readme/workspace.webp)
+
+<details>
+<summary>查看版面比例与跨页应用</summary>
+
+横纵比例随工程保存；旋转角标注为本次连接的临时值。
+
+![版面中的横向比例、纵向比例和临时旋转提示](assets/readme/layout.webp)
+
+一次选择页面，同时应用版面与横纵比例。
+
+![选择页面并统一应用版面设置](assets/readme/pages.webp)
+
+</details>
 
 ## 从底稿到纸面
+
+**导入底稿 → 编辑笔迹 → 对齐纸面 → 开始书写**，在同一个多页工程里完成。
 
 ### PDF 套打与纸面对位
 
@@ -40,7 +74,7 @@
 
 ### 多页工程，保存后接着编辑
 
-`.inkproj` 保存全部页面、可编辑笔迹、原始与处理后的背景、确认横线和排版设置。重新打开后继续编辑，也可读取旧 `.kjoy` 并另存新工程。轨迹可导出为 SVG 或 `openink-trajectories` JSON，再次导入使用。
+`.inkproj` 保存全部页面、可编辑笔迹、原始与处理后的背景、确认横线和排版设置。重新打开后继续编辑。轨迹可导出为 SVG 或 `openink-trajectories` JSON，再次导入使用。
 
 ## 从源码启动
 
@@ -75,6 +109,7 @@ python tools/write_svg.py your-centerline.svg --dry-run
 | 书写进度 | 根据设备已有回报作软件判断，书写中不追加查询或逐笔等待 |
 | 转换质量 | 位图可能漏笔、粘连或产生噪声，发送前检查预览；照片背景处理不能替代线路提取 |
 | 发布与平台 | 当前只提供源码；跨平台代码结构不代表其他系统或所有 GRBL 设备已验收 |
+| 已知问题 | 图片作为背景时，关闭操作可能无响应，待后续修复 |
 
 ## 代码、许可与资料
 
@@ -82,7 +117,7 @@ python tools/write_svg.py your-centerline.svg --dry-run
 
 源码以 **GPL-2.0-only** 发布，见 [LICENSE](LICENSE)。依赖保留各自许可证。若制作并分发二进制，需先处理 `usvg`（Apache-2.0）、PDF helper 的 `PyMuPDF`（AGPL-3.0）与本项目许可证的组合分发兼容性，不能把源码公开等同于打包分发条件已满足。
 
-默认构建关闭 gfont。私有开发版与公开版共用主线；私有构建显式启用 `private-gfont`。公开源码通过 `tools/export_public.py` 导出到独立仓库，以全新根提交开始，不共享开发仓库历史，也无需合并私有功能分支。具体操作见 [公开与私有构建](docs/contracts/公开与私有构建.md)。
+默认构建关闭 gfont。私有开发版与公开版共用主线；私有构建显式启用 `private-gfont`。公开源码由私有主线导出到独立仓库，不共享开发仓库历史，也无需合并私有功能分支；导出规则与检查工具仅保留在私有仓库。具体操作见 [公开与私有构建](docs/contracts/公开与私有构建.md)。
 
 | 入口 | 内容 |
 | --- | --- |

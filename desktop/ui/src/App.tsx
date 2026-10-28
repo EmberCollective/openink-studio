@@ -1,4 +1,5 @@
 import { useProjectFiles } from "./useProjectFiles";
+import { version as appVersion } from "../../package.json";
 import { WindowControls, dragWindow } from "./WindowControls";
 import { useJogKeys } from "./useJogKeys";
 import { ClipboardImport, type ClipboardFile } from "./ClipboardImport";
@@ -3543,7 +3544,7 @@ export default function App() {
             </div>
             <div>
               <span className="privacy-dot" />
-              本地处理 <span className="footer-divider" /> v0.4.3
+              本地处理 <span className="footer-divider" /> v{appVersion}
             </div>
           </footer>
         </div>

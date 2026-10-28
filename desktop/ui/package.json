@@ -1,11 +1,13 @@
 {
   "name": "openink-studio-ui",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.4",
   "license": "GPL-2.0-only",
   "type": "module",
   "scripts": {
+    "predev": "node ../scripts/sync-version.mjs",
     "dev": "vite --host 127.0.0.1",
+    "prebuild": "node ../scripts/sync-version.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1"
   },
