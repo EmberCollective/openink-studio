@@ -19,11 +19,7 @@
 
 源码预览 · Windows 开发与验证 · Rust / Tauri 2 / React · [GPL-2.0-only](LICENSE)
 
-公开学习版提供源码，**不提供安装包，不包含原厂 gfont 字库或私有解析库**。当前校准与换页流程仍待实机验收。
-
 ## 界面预览
-
-以下为当前前端的浏览器预览，使用自制示例工程；设备未连接。
 
 ![多页 PDF 底稿与可编辑的文字轨迹](assets/readme/workspace.webp)
 
