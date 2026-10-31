@@ -1,3 +1,4 @@
+use crate::model::TextJitter;
 use crate::{
     device::{self, DeviceCommand, DeviceEvent, DeviceService, Job},
     import::{self, ImportOptions},
@@ -70,12 +71,14 @@ impl Backend {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Scan,
-    AutoConnect,
+    AutoConnect { #[serde(default)] swap_xy: bool },
     Connect {
         port: String,
+        #[serde(default)] swap_xy: bool,
     },
     Recover {
         port: String,
+        #[serde(default)] swap_xy: bool,
     },
     Disconnect,
     Jog {
@@ -125,9 +128,9 @@ pub enum Request {
 pub fn device_command(command: Request, state: tauri::State<Backend>) -> Result<(), String> {
     let c = match command {
         Request::Scan => DeviceCommand::Scan,
-        Request::AutoConnect => DeviceCommand::AutoConnect,
-        Request::Connect { port } => DeviceCommand::Connect(port),
-        Request::Recover { port } => DeviceCommand::Recover(port),
+        Request::AutoConnect { swap_xy } => DeviceCommand::AutoConnect { swap_xy },
+        Request::Connect { port, swap_xy } => DeviceCommand::Connect { port, swap_xy },
+        Request::Recover { port, swap_xy } => DeviceCommand::Recover { port, swap_xy },
         Request::Disconnect => DeviceCommand::Disconnect,
         Request::Jog { x, y, feed } => DeviceCommand::Jog { x, y, feed },
         Request::Calibrate {
@@ -380,7 +383,9 @@ fn layout_font(
     height: f64,
     centerline: bool,
     options: &ImportOptions,
+    mut jitter: TextJitter,
 ) -> Result<Document, String> {
+    jitter.validate()?;
     if ![size, spacing, width, height].iter().all(|v| v.is_finite())
         || size <= 0.
         || size > 100.
@@ -461,6 +466,7 @@ fn layout_font(
         if row >= rows || row as f64 * pitch + (maxy - miny) > height {
             return Err("文字超出当前模板，请调整字号、行数或页尺寸".into());
         }
+        let first_stroke = strokes.len();
         for stroke in &glyph.strokes {
             strokes.push(
                 stroke
@@ -472,6 +478,7 @@ fn layout_font(
                     .collect(),
             );
         }
+        jitter.apply(&mut strokes[first_stroke..]);
         x += glyph.width_mm.max(ink_width) + spacing;
     }
     if strokes.is_empty() {
@@ -500,6 +507,7 @@ pub async fn font_document(
     height_mm: f64,
     centerline: bool,
     options: ImportOptions,
+    jitter: Option<TextJitter>,
 ) -> Result<Document, String> {
     tauri::async_runtime::spawn_blocking(move || {
         layout_font(
@@ -512,6 +520,7 @@ pub async fn font_document(
             height_mm,
             centerline,
             &options,
+            jitter.unwrap_or_default(),
         )
     })
     .await
@@ -523,7 +532,9 @@ pub fn generate_gcode(
     relative: bool,
     origin: Option<[f64; 2]>,
     registration: Option<crate::positioning::Registration>,
+    swap_xy: Option<bool>,
 ) -> Result<String, String> {
+    let wire_code = |lines: Vec<String>| lines.iter().map(|line| device::map_xy_axes(line, swap_xy.unwrap_or(false))).collect::<Vec<_>>().join("\n");
     if let Some(origin) = origin {
         if relative {
             return Err("Canvas positioning uses absolute G54 coordinates, not relative first-point placement".into());
@@ -533,7 +544,7 @@ pub fn generate_gcode(
         let mapping = if let Some([a,b,c,d]) = registration.matrix {
             format!("matrix [{a:.9}, {b:.9}, {c:.9}, {d:.9}]")
         } else { format!("scale {:.6}, rotation {:.6} degrees",registration.scale,registration.rotation_deg) };
-        return Ok(format!("; Fixed canvas placement: G54 origin at canvas X{:.3} Y{:.3} mm\n; Registration {mapping}\n; Requires the same confirmed calibration and raised Z0 before execution\n{}\n", origin[0], origin[1], lines.join("\n")));
+        return Ok(format!("; Fixed canvas placement: G54 origin at canvas X{:.3} Y{:.3} mm\n; Registration {mapping}\n; Requires the same confirmed calibration and raised Z0 before execution\n{}\n", origin[0], origin[1], wire_code(lines)));
     }
     if registration.is_some() { return Err("Registration requires a confirmed canvas origin".into()); }
     let lines = if relative {
@@ -546,11 +557,11 @@ pub fn generate_gcode(
     } else {
         "PREVIEW ONLY: assumed XY anchor 0,0; do not replay as a positioned job"
     };
-    Ok(format!("; {label}\n{}\n", lines.join("\n")))
+    Ok(format!("; {label}\n{}\n", wire_code(lines)))
 }
 #[tauri::command(rename_all = "snake_case")]
-pub fn export_gcode(path: String, job: Job, origin: Option<[f64; 2]>, registration: Option<crate::positioning::Registration>) -> Result<(), String> {
-    std::fs::write(path, generate_gcode(job, origin.is_none(), origin, registration)?).map_err(|e| e.to_string())
+pub fn export_gcode(path: String, job: Job, origin: Option<[f64; 2]>, registration: Option<crate::positioning::Registration>, swap_xy: Option<bool>) -> Result<(), String> {
+    std::fs::write(path, generate_gcode(job, origin.is_none(), origin, registration, swap_xy)?).map_err(|e| e.to_string())
 }
 #[tauri::command(rename_all = "snake_case")]
 pub fn export_document(path: String, document: Document, format: String) -> Result<(), String> {
@@ -631,9 +642,10 @@ pub async fn glyph_font_document(
     rows: usize,
     width_mm: f64,
     height_mm: f64,
+    jitter: Option<TextJitter>,
 ) -> Result<Document, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::glyphs::compose(
+        crate::glyphs::compose_jittered(
             Path::new(&path),
             &text,
             size_mm,
@@ -641,6 +653,7 @@ pub async fn glyph_font_document(
             rows,
             width_mm,
             height_mm,
+            jitter.unwrap_or_default(),
         )
     })
     .await
@@ -747,13 +760,44 @@ mod tests {
             z_feed: 300.,
             z_down: 4.,
         };
-        let code = generate_gcode(job.clone(), false, Some([10., 10.]), None).unwrap();
+        let code = generate_gcode(job.clone(), false, Some([10., 10.]), None, None).unwrap();
         assert!(code.contains("G54"));
         assert!(code.contains("X10.000 Y-20.000"));
         assert!(code.contains("X12.000 Y-25.000"));
         assert!(!code.contains("G10"));
         assert!(!code.contains("$H"));
-        assert!(generate_gcode(job, true, Some([10., 10.]), None).is_err());
+        let swapped = generate_gcode(job.clone(), false, Some([10.,10.]), None, Some(true)).unwrap();
+        assert!(swapped.contains("G1 Y10.000 X-20.000 F1500"));
+        assert!(swapped.contains("G1 Y12.000 X-25.000 F1200"));
+        assert!(swapped.contains("G1 G90 Z4.000 F300"));
+        let relative = generate_gcode(job.clone(), true, None, None, Some(true)).unwrap();
+        assert!(relative.contains("G1 G91 Y2.000 X-5.000 F1200"));
+        let path = std::env::temp_dir().join(format!("openink-axis-export-{}.gcode", std::process::id()));
+        export_gcode(path.to_string_lossy().into_owned(), job.clone(), Some([10.,10.]), None, Some(true)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), swapped);
+        std::fs::remove_file(path).unwrap();
+        assert!(generate_gcode(job, true, Some([10., 10.]), None, None).is_err());
+    }
+    #[test]
+    fn connection_mapping_is_optional_but_strictly_boolean() {
+        assert!(matches!(serde_json::from_value::<Request>(json!({"type":"connect","port":"mock"})).unwrap(), Request::Connect { swap_xy:false, .. }));
+        for kind in ["connect", "auto_connect", "recover"] {
+            assert!(serde_json::from_value::<Request>(json!({"type":kind,"port":"mock","swap_xy":true})).is_ok());
+            assert!(serde_json::from_value::<Request>(json!({"type":kind,"port":"mock","swap_xy":"true"})).is_err());
+        }
+    }
+    #[test]
+    fn font_layout_jitter_preserves_paths_and_repeats_with_seed() {
+        let path = Path::new("C:/Windows/Fonts/arial.ttf");
+        if !path.exists() { return; }
+        let render = |jitter| layout_font(path, "AAA", 10., 1., 3, 100., 100., false, &ImportOptions::default(), jitter).unwrap();
+        let plain = render(TextJitter::default());
+        let jitter = TextJitter { x_mm:1., y_mm:1., rotation_deg:5., scale_x_percent:10., scale_y_percent:10., scale_percent:10., seed:42, ..Default::default() };
+        let a = render(jitter);
+        let b = render(jitter);
+        assert_eq!(a.strokes,b.strokes);
+        assert_ne!(a.strokes,plain.strokes);
+        assert_eq!(a.strokes.iter().map(Vec::len).collect::<Vec<_>>(),plain.strokes.iter().map(Vec::len).collect::<Vec<_>>());
     }
     #[test]
     fn font_layout_rejects_invalid_parameters() {
@@ -766,7 +810,8 @@ mod tests {
             100.,
             100.,
             false,
-            &ImportOptions::default()
+            &ImportOptions::default(),
+            TextJitter::default()
         )
         .is_err());
         assert!(layout_font(
@@ -778,7 +823,8 @@ mod tests {
             100.,
             100.,
             false,
-            &ImportOptions::default()
+            &ImportOptions::default(),
+            TextJitter::default()
         )
         .is_err());
     }

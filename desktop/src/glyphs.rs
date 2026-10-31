@@ -291,6 +291,20 @@ pub fn compose(
     width_mm: f64,
     height_mm: f64,
 ) -> Result<Document, String> {
+    compose_jittered(path, text, size_mm, spacing_mm, rows, width_mm, height_mm, crate::model::TextJitter::default())
+}
+
+pub fn compose_jittered(
+    path: &Path,
+    text: &str,
+    size_mm: f64,
+    spacing_mm: f64,
+    rows: usize,
+    width_mm: f64,
+    height_mm: f64,
+    mut jitter: crate::model::TextJitter,
+) -> Result<Document, String> {
+    jitter.validate()?;
     if [size_mm, width_mm, height_mm]
         .iter()
         .any(|v| !v.is_finite() || *v <= 0.)
@@ -352,6 +366,7 @@ pub fn compose(
                 "Text exceeds configured rows or page height; no characters were discarded".into(),
             );
         }
+        let first_stroke = strokes.len();
         if let Some(g) = glyph {
             let scale = size_mm / g.height_mm;
             for line in &g.strokes {
@@ -369,6 +384,7 @@ pub fn compose(
                 );
             }
         }
+        jitter.apply(&mut strokes[first_stroke..]);
         x += advance + spacing_mm;
     }
     if strokes.is_empty() {

@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "openink-studio"
-version = "0.4.4"
+version = "0.4.6"
 dependencies = [
  "openink-model",
  "serde",

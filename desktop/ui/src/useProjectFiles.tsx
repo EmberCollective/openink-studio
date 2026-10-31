@@ -14,8 +14,9 @@ function recentProjects(): string[] {
   catch { return []; }
 }
 
-export function useProjectFiles({ snapshot, path, onPath, blocked, desktop, onSave, onOpen, onNew, onMessage }: {
+export function useProjectFiles({ snapshot, path, onPath, blocked, closeBlocked = blocked, closeWarning = "", desktop, onSave, onOpen, onNew, onMessage }: {
   snapshot: Project; path: string; onPath: (path: string) => void; blocked: boolean; desktop: boolean;
+  closeBlocked?: boolean; closeWarning?: string;
   onSave: (path: string, project: Project) => Promise<void>;
   onOpen: (path: string) => Promise<void>; onNew: () => Promise<void>;
   onMessage: (message: string, error?: boolean) => void;
@@ -23,10 +24,11 @@ export function useProjectFiles({ snapshot, path, onPath, blocked, desktop, onSa
   const key = useMemo(() => JSON.stringify(snapshot), [snapshot]);
   const [clean, setClean] = useState(key), [pending, setPending] = useState(false);
   const [prompt, setPrompt] = useState(false), [recent, setRecent] = useState(recentProjects);
+  const [closingPrompt, setClosingPrompt] = useState(false);
   const choice = useRef<((choice: Choice) => void) | null>(null);
   const operation = useRef(false), cleanAfterRestore = useRef(false);
-  const current = useRef({ snapshot, key, path, blocked, onSave, onOpen, onNew, onMessage });
-  current.current = { snapshot, key, path, blocked, onSave, onOpen, onNew, onMessage };
+  const current = useRef({ snapshot, key, path, blocked, closeBlocked, closeWarning, onSave, onOpen, onNew, onMessage });
+  current.current = { snapshot, key, path, blocked, closeBlocked, closeWarning, onSave, onOpen, onNew, onMessage };
   const dirty = clean !== key;
   const dirtyRef = useRef(dirty); dirtyRef.current = dirty;
   useEffect(() => {
@@ -40,26 +42,27 @@ export function useProjectFiles({ snapshot, path, onPath, blocked, desktop, onSa
       return next;
     });
   }
-  async function write(as = false): Promise<boolean> {
+  async function write(as = false, closing = false): Promise<boolean> {
     const saved = current.current;
     const legacy = /\.kjoy$/i.test(saved.path);
     const selected = as || !saved.path || legacy ? await save({ defaultPath: saved.path.replace(/\.kjoy$/i, ".inkproj") || "书写工程.inkproj", filters: [{ name: "OpenInk 工程包", extensions: ["inkproj"] }] }) : saved.path;
     if (!selected) return false;
-    if (current.current.blocked) return false;
+    if (closing ? current.current.closeBlocked : current.current.blocked) return false;
     await saved.onSave(selected, saved.snapshot);
     onPath(selected); setNativeProjectTitle(selected); setClean(saved.key); remember(selected);
     saved.onMessage(`已保存完整工程 ${selected.split(/[\\/]/).pop()}`);
     // Edits made while the dialog or write was pending must remain unsaved.
     return current.current.key === saved.key;
   }
-  async function guard(): Promise<boolean> {
-    if (!dirtyRef.current) return true;
+  async function guard(closing = false): Promise<boolean> {
+    if (!dirtyRef.current && !(closing && current.current.closeWarning)) return true;
+    setClosingPrompt(closing);
     const answer = await new Promise<Choice>(resolve => { choice.current = resolve; setPrompt(true); });
     if (answer === "cancel") return false;
-    return answer === "discard" || await write();
+    return answer === "discard" || await write(false, closing);
   }
-  async function run(action: () => Promise<void>) {
-    if (current.current.blocked || operation.current) return;
+  async function run(action: () => Promise<void>, closing = false) {
+    if ((closing ? current.current.closeBlocked : current.current.blocked) || operation.current) return;
     operation.current = true; setPending(true);
     try { await action(); } catch (e) { current.current.onMessage(String(e), true); }
     finally { operation.current = false; setPending(false); }
@@ -77,13 +80,13 @@ export function useProjectFiles({ snapshot, path, onPath, blocked, desktop, onSa
   });
   const close = useRef(async () => {});
   close.current = async () => {
-    if (current.current.blocked) { current.current.onMessage("请先停止当前任务，再关闭工程", true); return; }
+    if (current.current.closeBlocked) { current.current.onMessage("请先停止当前任务，再关闭工程", true); return; }
     await run(async () => {
-      if (!await guard() || current.current.blocked) return;
+      if (!await guard(true) || current.current.closeBlocked) return;
       // The native close request has already been prevented. Only destroy after
       // the unsaved-work guard succeeds, and let run() report native failures.
       await getCurrentWindow().destroy();
-    });
+    }, true);
   };
   useEffect(() => {
     if (!desktop) return;
@@ -117,6 +120,7 @@ export function useProjectFiles({ snapshot, path, onPath, blocked, desktop, onSa
   }}><div className="modal project-confirmation" role="dialog" aria-modal="true" aria-labelledby="project-confirm-title">
     <h2 id="project-confirm-title">保存当前工程的更改？</h2>
     <p className="field-note">尚未保存的内容将在离开工程后丢失。</p>
+    {closingPrompt && closeWarning && <p className="field-note" role="status">{closeWarning}</p>}
     <div className="project-confirm-actions"><button className="button" autoFocus onClick={() => answer("cancel")}>取消</button><button className="button" onClick={() => answer("discard")}>不保存</button><button className="button primary" onClick={() => answer("save")}>保存并继续</button></div>
   </div></div> : null;
   return { dirty, pending, recent, saveProject, openProject, newProject, confirmation };

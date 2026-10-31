@@ -1,4 +1,5 @@
 //! Place original font coordinates against confirmed paper baselines, without bbox re-alignment.
+use crate::model::TextJitter;
 use crate::{glyphs, import::{self, ImportOptions}, model::{Document, Point, Stroke}};
 #[cfg(feature = "private-gfont")]
 use crate::legacy_font;
@@ -16,12 +17,13 @@ pub struct TextOptions {
     pub baseline_offset_mm: f64, pub legacy_baseline: f64, pub legacy_percent: f64,
     pub legacy_seed: u64, pub centerline: bool, pub options: ImportOptions,
     pub width_mm: f64, pub height_mm: f64,
+    #[serde(default)] pub jitter: TextJitter,
 }
 #[derive(Clone)]
 struct Letter { strokes: Vec<Stroke>, advance: f64 }
 
 fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: f64,
-    width: f64, height: f64, mut letter: impl FnMut(char) -> Result<Letter, String>) -> Result<Document, String> {
+    width: f64, height: f64, mut jitter: TextJitter, mut letter: impl FnMut(char) -> Result<Letter, String>) -> Result<Document, String> {
     let mut strokes: Vec<(usize, Stroke)> = vec![];
     let (mut row, mut cursor, mut count) = (start, 0., 0usize);
     for ch in text.chars().filter(|c| *c != '\r') {
@@ -39,6 +41,7 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
                 row += 1; cursor = 0.; continue;
             }
             let (tx, ty) = (dx / length, dy / length);
+            let mut placed = vec![];
             for stroke in &glyph.strokes {
                 count += stroke.len();
                 if count > 2_000_000 { return Err("文字路径超过两百万个点".into()); }
@@ -46,8 +49,10 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
                     let along = cursor - minx + p.x; let normal = p.y - offset;
                     Point { x: line.start[0] + tx * along - ty * normal, y: line.start[1] + ty * along + tx * normal }
                 }).collect();
-                strokes.push((row, transformed));
+                placed.push(transformed);
             }
+            jitter.apply(&mut placed);
+            strokes.extend(placed.into_iter().map(|stroke| (row, stroke)));
             cursor += glyph.advance - minx + spacing;
             break;
         }
@@ -78,6 +83,7 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
     import::validate(Document { name: "沿横线文字".into(), width_mm: width, height_mm: height, strokes: strokes.into_iter().map(|(_, stroke)| stroke).collect() })
 }
 pub fn compose(o: &TextOptions) -> Result<Document, String> {
+    o.jitter.validate()?;
     if ![o.size_mm,o.spacing_mm,o.baseline_offset_mm,o.legacy_baseline,o.legacy_percent,o.width_mm,o.height_mm].iter().all(|v|v.is_finite())
         || !(0.1..=100.).contains(&o.size_mm) || !(0.0..=100.).contains(&o.spacing_mm)
         || !(0.0..=100.).contains(&o.baseline_offset_mm) || !(0.0..=4.).contains(&o.legacy_baseline)
@@ -108,7 +114,7 @@ pub fn compose(o: &TextOptions) -> Result<Document, String> {
     if !["legacy","glyph","regular"].contains(&o.font_mode.as_str()) { return Err("不支持的字体来源".into()); }
     #[cfg(feature = "private-gfont")]
     let mut random=legacy_font::Random(o.legacy_seed);
-    layout(&o.text,&o.guide_lines,o.start_line,o.spacing_mm,o.baseline_offset_mm,o.width_mm,o.height_mm,|ch| {
+    layout(&o.text,&o.guide_lines,o.start_line,o.spacing_mm,o.baseline_offset_mm,o.width_mm,o.height_mm,o.jitter,|ch| {
         if ch.is_whitespace() { return Ok(Letter { strokes:vec![], advance:o.size_mm*if o.font_mode=="legacy" {o.legacy_percent/100.*0.3}else{0.5} }); }
         #[cfg(feature = "private-gfont")]
         if o.font_mode=="legacy" {
@@ -141,8 +147,8 @@ pub fn compose(o: &TextOptions) -> Result<Document, String> {
 #[tauri::command(rename_all = "snake_case")]
 pub async fn lined_text_document(font_mode:String,path:String,selections:Vec<FontSelection>,text:String,size_mm:f64,spacing_mm:f64,
     guide_lines:Vec<GuideLine>,start_line:usize,baseline_offset_mm:f64,legacy_baseline:f64,legacy_percent:f64,legacy_seed:u64,
-    centerline:bool,options:ImportOptions,width_mm:f64,height_mm:f64)->Result<Document,String>{
-    tauri::async_runtime::spawn_blocking(move||compose(&TextOptions{font_mode,path,selections,text,size_mm,spacing_mm,guide_lines,start_line,baseline_offset_mm,legacy_baseline,legacy_percent,legacy_seed,centerline,options,width_mm,height_mm})).await.map_err(|e|e.to_string())?
+    centerline:bool,options:ImportOptions,width_mm:f64,height_mm:f64,jitter:Option<TextJitter>)->Result<Document,String>{
+    tauri::async_runtime::spawn_blocking(move||compose(&TextOptions{font_mode,path,selections,text,size_mm,spacing_mm,guide_lines,start_line,baseline_offset_mm,legacy_baseline,legacy_percent,legacy_seed,centerline,options,width_mm,height_mm,jitter:jitter.unwrap_or_default()})).await.map_err(|e|e.to_string())?
 }
 
 #[cfg(test)]
@@ -153,12 +159,20 @@ mod tests{
  #[test]
  #[cfg(not(feature = "private-gfont"))]
  fn public_build_rejects_private_font_before_loading_files(){
-  let options=TextOptions{font_mode:"legacy".into(),path:String::new(),selections:vec![FontSelection{path:"must-not-be-read.gfont".into(),weight:1.}],text:"A".into(),size_mm:10.,spacing_mm:1.,guide_lines:vec![line(20.)],start_line:0,baseline_offset_mm:0.,legacy_baseline:1.,legacy_percent:100.,legacy_seed:1,centerline:false,options:ImportOptions::default(),width_mm:100.,height_mm:100.};
+  let options=TextOptions{font_mode:"legacy".into(),path:String::new(),selections:vec![FontSelection{path:"must-not-be-read.gfont".into(),weight:1.}],text:"A".into(),size_mm:10.,spacing_mm:1.,guide_lines:vec![line(20.)],start_line:0,baseline_offset_mm:0.,legacy_baseline:1.,legacy_percent:100.,legacy_seed:1,centerline:false,options:ImportOptions::default(),width_mm:100.,height_mm:100.,jitter:TextJitter::default()};
   assert!(!crate::commands::private_gfont_available());
   assert!(compose(&options).unwrap_err().contains("此版本不支持"));
  }
- #[test]fn real_baselines_and_nonuniform_rows(){let d=layout("AB\nA",&[line(20.),line(31.),line(48.)],0,1.,0.5,100.,100.,letter).unwrap();assert_eq!(d.strokes[0][1].y,19.5);assert_eq!(d.strokes[1][1].y,30.5);assert_eq!(d.strokes[2][1].y,47.5);assert_eq!(d.strokes[0][0].y,11.5);assert_eq!(d.strokes[1][0].y,26.5);}
- #[test]fn overflow_is_error_not_dropped_text(){assert!(layout("AAA",&[line(20.)],0,1.,0.,100.,100.,letter).is_err());}
- #[test]fn slanted_line_rotates_whole_glyph(){let g=GuideLine{id:"a".into(),start:[10.,20.],end:[110.,30.]};let d=layout("A",&[g],0,0.,0.,200.,100.,letter).unwrap();assert!((d.strokes[0][1].y-(20.+6./10100_f64.sqrt()*10.)).abs()<1e-6);}
- #[test]fn first_nonempty_row_fits_inside_page_without_rejecting(){let d=layout("A",&[line(20.),line(2.)],1,0.,0.,100.,100.,letter).unwrap();assert!(d.strokes.iter().flatten().all(|p|p.y>=0.&&p.y<=100.));}
+ #[test]fn real_baselines_and_nonuniform_rows(){let d=layout("AB\nA",&[line(20.),line(31.),line(48.)],0,1.,0.5,100.,100.,TextJitter::default(),letter).unwrap();assert_eq!(d.strokes[0][1].y,19.5);assert_eq!(d.strokes[1][1].y,30.5);assert_eq!(d.strokes[2][1].y,47.5);assert_eq!(d.strokes[0][0].y,11.5);assert_eq!(d.strokes[1][0].y,26.5);}
+ #[test]fn overflow_is_error_not_dropped_text(){assert!(layout("AAA",&[line(20.)],0,1.,0.,100.,100.,TextJitter::default(),letter).is_err());}
+ #[test]fn jitter_keeps_rows_in_page_and_rejects_oversized_ink(){
+  let jitter=TextJitter{x_mm:2.,y_mm:2.,rotation_deg:10.,scale_percent:30.,..Default::default()};
+  let a=layout("AA",&[line(2.),line(20.)],0,1.,0.,100.,100.,jitter,letter).unwrap();
+  let b=layout("AA",&[line(2.),line(20.)],0,1.,0.,100.,100.,jitter,letter).unwrap();
+  assert_eq!(a.strokes,b.strokes);
+  assert!(a.strokes.iter().flatten().all(|p|p.x>=0.&&p.y>=0.&&p.x<=100.&&p.y<=100.));
+  assert!(layout("A",&[line(20.)],0,1.,0.,1.,1.,jitter,letter).is_err());
+ }
+ #[test]fn slanted_line_rotates_whole_glyph(){let g=GuideLine{id:"a".into(),start:[10.,20.],end:[110.,30.]};let d=layout("A",&[g],0,0.,0.,200.,100.,TextJitter::default(),letter).unwrap();assert!((d.strokes[0][1].y-(20.+6./10100_f64.sqrt()*10.)).abs()<1e-6);}
+ #[test]fn first_nonempty_row_fits_inside_page_without_rejecting(){let d=layout("A",&[line(20.),line(2.)],1,0.,0.,100.,100.,TextJitter::default(),letter).unwrap();assert!(d.strokes.iter().flatten().all(|p|p.y>=0.&&p.y<=100.));}
 }

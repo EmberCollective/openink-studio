@@ -5,6 +5,7 @@ export function guideLineNumber(line: GuideLine, index: number): number {
   return Number.isSafeInteger(number) ? number : index + 1;
 }
 export type TextSettings = {
+  jitter?: { x_mm_min?: number; y_mm_min?: number; rotation_deg_min?: number; scale_x_percent_min?: number; scale_y_percent_min?: number; scale_percent_min?: number; x_mm: number; y_mm: number; rotation_deg: number; scale_x_percent: number; scale_y_percent: number; scale_percent: number };
   text: string; font_mode: "regular" | "glyph" | "legacy"; font_path: string; glyph_path: string;
   legacy_selection: { path: string; weight: number }[]; legacy_percent: number; legacy_baseline: number; legacy_seed: number;
   centerline: boolean; placement: "free" | "lines"; start_line: number; offset: number; font_size_mm: number; letter_spacing_mm: number;
@@ -13,9 +14,11 @@ export function validTextSettings(value: unknown): value is TextSettings {
   if (!value || typeof value !== "object") return false;
   const v = value as TextSettings;
   const range = (n: number, lo: number, hi: number) => Number.isFinite(n) && n >= lo && n <= hi;
+  const jitterRange = (min: number | undefined, max: number, limit: number) => range(min ?? -max, -limit, limit) && range(max, -limit, limit) && (min ?? -max) <= max;
   return typeof v.text === "string" && v.text.length <= 1_000_000 && ["regular", "glyph", "legacy"].includes(v.font_mode)
     && typeof v.font_path === "string" && typeof v.glyph_path === "string" && typeof v.centerline === "boolean"
     && ["free", "lines"].includes(v.placement) && Number.isInteger(v.start_line) && range(v.start_line, 0, 10000)
+    && (v.jitter === undefined || (!!v.jitter && jitterRange(v.jitter.x_mm_min, v.jitter.x_mm, 20) && jitterRange(v.jitter.y_mm_min, v.jitter.y_mm, 20) && jitterRange(v.jitter.rotation_deg_min, v.jitter.rotation_deg, 180) && jitterRange(v.jitter.scale_x_percent_min, v.jitter.scale_x_percent, 50) && jitterRange(v.jitter.scale_y_percent_min, v.jitter.scale_y_percent, 50) && jitterRange(v.jitter.scale_percent_min, v.jitter.scale_percent, 50)))
     && range(v.offset, 0, 10) && range(v.font_size_mm, 1, 80) && range(v.letter_spacing_mm, 0, 20)
     && range(v.legacy_percent, 1, 200) && range(v.legacy_baseline, 0, 2) && Number.isInteger(v.legacy_seed) && range(v.legacy_seed, 0, 2147483647)
     && Array.isArray(v.legacy_selection) && v.legacy_selection.length <= 1000 && v.legacy_selection.every(f => f && typeof f.path === "string" && Number.isFinite(f.weight) && f.weight >= 0);

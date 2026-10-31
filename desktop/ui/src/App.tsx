@@ -422,17 +422,19 @@ export default function App() {
   const paperPreviousSetup = useRef<RegistrationSetup | null>(null);
   const [paperCalibrationStarted, setPaperCalibrationStarted] = useState(false);
   const paperWizardRef = useRef(paperWizard); paperWizardRef.current = paperWizard;
+  const [textJitter, setTextJitter] = useState<NonNullable<TextSettings["jitter"]>>({ x_mm: 0, y_mm: 0, rotation_deg: 0, scale_x_percent: 0, scale_y_percent: 0, scale_percent: 0 });
   const [textPlacement, setTextPlacement] = useState<"free" | "lines">("free");
   const [lineStart, setLineStart] = useState(0), [lineOffset, setLineOffset] = useState(0.5);
   const background = paperPreview || backgroundPages[canvasPage];
   const canvasPageCount = Math.max(1, canvasPage + 1, backgroundPages.length, ...[...pageDocuments.current.keys()].map(i => i + 1));
   function captureTextSettings(): TextSettings {
     return { text, font_mode: fontMode, font_path: font, glyph_path: glyphFont, legacy_selection: legacySelection,
-      legacy_percent: legacyPercent, legacy_baseline: legacyBaseline, legacy_seed: legacySeed, centerline,
+      legacy_percent: legacyPercent, legacy_baseline: legacyBaseline, legacy_seed: legacySeed, centerline, jitter: textJitter,
       placement: textPlacement, start_line: lineStart, offset: lineOffset, font_size_mm: template.font_size_mm, letter_spacing_mm: template.letter_spacing_mm };
   }
   function restoreTextSettings(doc: Document) {
     const value = doc.text_settings;
+    setTextJitter(validTextSettings(value) && value.jitter ? value.jitter : { x_mm: 0, y_mm: 0, rotation_deg: 0, scale_x_percent: 0, scale_y_percent: 0, scale_percent: 0 });
     if (!validTextSettings(value)) { setTextPlacement("free"); setLineStart(0); return; }
     setText(value.text); setFontMode(value.font_mode); setFont(value.font_path); setGlyphFont(value.glyph_path);
     setLegacySelection(value.legacy_selection); setLegacyPercent(value.legacy_percent); setLegacyBaseline(value.legacy_baseline); setLegacySeed(value.legacy_seed); setCenterline(value.centerline);
@@ -489,6 +491,11 @@ export default function App() {
     [port, setPort] = useState(""),
     [connected, setConnected] = useState(""),
     [status, setStatus] = useState<DeviceStatus>({ state: "未连接" });
+  const [swapXY, setSwapXY] = useState(() => {
+    try { return window.localStorage.getItem("openink-swap-xy") === "true"; }
+    catch { return false; }
+  });
+  const [connecting, setConnecting] = useState(false);
   const [autoConnect, setAutoConnect] = useState(false),
     [running, setRunning] = useState(false),
     [paused, setPaused] = useState(false),
@@ -663,21 +670,30 @@ export default function App() {
       setBusy("");
     }
   }
+  function changeSwapXY(value: boolean) {
+    if (connected || connectionAttempt.current || machineBusy) return;
+    try {
+      window.localStorage.setItem("openink-swap-xy", String(value));
+      setSwapXY(value);
+    } catch { notify("无法保存轴向设置，请检查本机存储后重试", true); }
+  }
   async function command(command: Record<string, unknown>) {
     if (recovering) return false;
-    const connecting = ["connect", "auto_connect", "recover"].includes(
+    const isConnecting = ["connect", "auto_connect", "recover"].includes(
       String(command.type),
     );
-    if (connecting) {
+    if (isConnecting) {
+      if (connectionAttempt.current) return false;
+      setConnecting(true);
       connectionAttempt.current = true;
       setConnectionError(false);
       setConfirmedOrigin(null);
     }
     try {
-      await call("device_command", { command });
+      await call("device_command", { command: isConnecting ? { ...command, swap_xy: swapXY } : command });
       return true;
     } catch (e) {
-      if (connecting) setConnectionError(true);
+      if (isConnecting) { setConnectionError(true); setConnecting(false); connectionAttempt.current = false; }
       notify(String(e), true);
       return false;
     }
@@ -688,16 +704,19 @@ export default function App() {
     void command({ type: "stop" });
   }
   async function recoverConnection() {
-    if (!port || recovering || positioning || (running && connected)) return;
+    if (!port || connectionAttempt.current || recovering || positioning || (running && connected)) return;
     setRecovering(true);
+    setConnecting(true);
     connectionAttempt.current = true;
     setConnectionError(false);
     setConfirmedOrigin(null);
     notify("正在清除旧任务、恢复连接并抬笔");
     try {
-      await call("device_command", { command: { type: "recover", port } });
+      await call("device_command", { command: { type: "recover", port, swap_xy: swapXY } });
     } catch (e) {
       setRecovering(false);
+      setConnecting(false);
+      connectionAttempt.current = false;
       setConnectionError(true);
       notify(String(e), true);
     }
@@ -1183,11 +1202,14 @@ export default function App() {
               if (projectCalibrationRef.current || currentLayoutRef.current.scale_x !== undefined) { setAutomaticOrigin(false); setProjectNeedsAlignment(true); }
               else setAutomaticOrigin(true);
               connectionAttempt.current = false;
+              setConnecting(false);
               setConnectionError(false);
               setConnected(e.port || "");
               notify(`已连接 ${e.port}`);
               break;
             case "disconnected":
+              setConnecting(false);
+              connectionAttempt.current = false;
               resetOriginLayout.current = null;
               setRegistration(preservedRegistrationRef.current || identityRegistration); setRegistrationLocked(false); setSessionVersion(v => v + 1);
               submittedStrokes.current = null;
@@ -1291,7 +1313,7 @@ export default function App() {
             case "error":
               resetOriginLayout.current = null;
               setRegistrationErrorVersion(v => v + 1);
-              if (connectionAttempt.current) setConnectionError(true);
+              if (connectionAttempt.current) { setConnectionError(true); setConnecting(false); connectionAttempt.current = false; }
               notify(e.message || "设备错误", true);
               break;
             case "job_rejected":
@@ -1324,6 +1346,17 @@ export default function App() {
     };
   }, []);
   const initialPaperFit = useRef(false);
+  useEffect(() => {
+    const host = paperHost.current;
+    if (!host) return;
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey || event.deltaY === 0) return;
+      event.preventDefault();
+      setZoom(z => Math.min(8, Math.max(0.3, Math.round((z + (event.deltaY < 0 ? 0.1 : -0.1)) * 100) / 100)));
+    };
+    host.addEventListener("wheel", wheel, { passive: false });
+    return () => host.removeEventListener("wheel", wheel);
+  }, []);
   function fitPaper() {
     const el = paperHost.current;
     if (!el || el.clientWidth <= 104 || el.clientHeight <= 62) return;
@@ -1366,11 +1399,12 @@ export default function App() {
       if (fontMode === "glyph" && !glyphFont)
         throw new Error("请先从 PDF / 图片提取字形，或选择已有本地字库");
       if (!text.trim()) throw new Error("请输入文字内容");
+      const jitter = { ...textJitter, seed: crypto.getRandomValues(new Uint32Array(1))[0] };
       if (textPlacement === "lines") {
         if (!background?.processed || !background.guide_lines?.length) throw new Error("请先完成纸张背景设置并确认横线");
         if (fontMode === "legacy" && !legacySelection.length) throw new Error("请先选择原版 gfont 字体");
         const d = await call<Document>("lined_text_document", {
-          font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text,
+          jitter, font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text,
           size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm,
           guide_lines: background.guide_lines, start_line: lineStart, baseline_offset_mm: lineOffset,
           legacy_baseline: legacyBaseline, legacy_percent: legacyPercent, legacy_seed: legacySeed,
@@ -1399,6 +1433,7 @@ export default function App() {
             font_size_percent: legacyPercent,
             page_width_mm: template.width_mm - 2 * template.margin_mm,
             seed: legacySeed,
+            jitter,
           },
         });
         setLegacyMissing(result.missing);
@@ -1424,6 +1459,7 @@ export default function App() {
           text,
           size_mm: template.font_size_mm,
           spacing_mm: template.letter_spacing_mm,
+          jitter,
           rows: template.lines,
           width_mm: template.width_mm - 2 * template.margin_mm,
           height_mm: template.height_mm - 2 * template.margin_mm,
@@ -1822,6 +1858,7 @@ export default function App() {
       const value = await call<string>("generate_gcode", {
         job: job(await currentRoute()),
         relative: false,
+        swap_xy: swapXY,
         origin: automaticOrigin ? null : confirmedOrigin,
         registration: automaticOrigin ? null : registration,
       });
@@ -1877,6 +1914,7 @@ export default function App() {
       if (format === "gcode")
         await call("export_gcode", {
           path,
+          swap_xy: swapXY,
           job: job(await currentRoute()),
           origin: automaticOrigin ? null : confirmedOrigin,
         registration: automaticOrigin ? null : registration,
@@ -1898,11 +1936,13 @@ export default function App() {
       background_visible: backgroundVisible, show_margins: showMargins,
     } satisfies Project;
   }
-  const projectSnapshot = useMemo(buildProjectSnapshot, [preparedDoc, canvasPage, backgroundPages, template, layouts, pageLayoutIds, feed, travelFeed, zFeed, zDown, jogStep, optimizeTrajectory, allowReverse, allowWritingGap, maxWritingGap, deduplicateWriting, registrationSetup, projectNeedsAlignment, projectCalibration, confirmedOrigin, originDraft, registration, registrationProfiles, options, backgroundVisible, showMargins, text, fontMode, font, glyphFont, legacySelection, legacyPercent, legacyBaseline, legacySeed, centerline, textPlacement, lineStart, lineOffset]);
+  const projectSnapshot = useMemo(buildProjectSnapshot, [preparedDoc, canvasPage, backgroundPages, template, layouts, pageLayoutIds, feed, travelFeed, zFeed, zDown, jogStep, optimizeTrajectory, allowReverse, allowWritingGap, maxWritingGap, deduplicateWriting, registrationSetup, projectNeedsAlignment, projectCalibration, confirmedOrigin, originDraft, registration, registrationProfiles, options, backgroundVisible, showMargins, text, fontMode, font, glyphFont, legacySelection, legacyPercent, legacyBaseline, legacySeed, centerline, textJitter, textPlacement, lineStart, lineOffset]);
   const projectSnapshotRef = useRef(projectSnapshot);
   projectSnapshotRef.current = projectSnapshot;
   const files = useProjectFiles({ snapshot: projectSnapshot, path: projectPath, onPath: setProjectPath,
     blocked: editingBlocked() || !!busy, desktop,
+    closeBlocked: machineBusy || !!busy || registrationLocked,
+    closeWarning: paperWizard ? "图片背景设置尚未完成，未应用的背景和调整不会保存。选择取消可返回继续设置；保存并继续只保存已应用的工程内容。" : "",
     onSave: async (path, project) => { await call("save_project", { path, project }); },
     onOpen: restoreProject, onNew: resetProject, onMessage: notify });
   async function saveProject() { await files.saveProject(); }
@@ -2414,6 +2454,29 @@ export default function App() {
                           />
                         </Field>
                         <div className="field-grid"><NumberField label="字号" value={template.font_size_mm} onChange={v => updateTemplate("font_size_mm", v)} min={1} max={80} /><NumberField label="字间距" value={template.letter_spacing_mm} onChange={v => updateTemplate("letter_spacing_mm", v)} min={0} max={20} step={0.5} /></div>
+                        <details>
+                          <summary>逐字随机抖动</summary>
+                          {([
+                            ["x_mm", "水平位移", "mm", 20, 0.1],
+                            ["y_mm", "垂直位移", "mm", 20, 0.1],
+                            ["rotation_deg", "旋转角度", "°", 180, 0.5],
+                            ["scale_x_percent", "横向缩放变化", "%", 50, 1],
+                            ["scale_y_percent", "纵向缩放变化", "%", 50, 1],
+                            ["scale_percent", "整体大小变化", "%", 50, 1],
+                          ] as const).map(([key, label, unit, limit, step]) => {
+                            const minKey = `${key}_min` as const;
+                            const lower = textJitter[minKey] ?? -textJitter[key];
+                            return <div key={key} role="group" aria-label={label}>
+                              <div className="field-label">{label}</div>
+                              <div className="field-grid">
+                                <NumberField label="下限" unit={unit} value={lower} onChange={v => setTextJitter(j => ({ ...j, [minKey]: v }))} min={-limit} max={limit} step={step} />
+                                <NumberField label="上限" unit={unit} value={textJitter[key]} onChange={v => setTextJitter(j => ({ ...j, [minKey]: j[minKey] ?? -j[key], [key]: v }))} min={-limit} max={limit} step={step} />
+                              </div>
+                              {lower > textJitter[key] && <p className="inline-error">下限不能大于上限</p>}
+                            </div>;
+                          })}
+                          <p className="field-note">每个字在下限与上限之间随机取值；两端均为 0 时关闭。缩放变化 −10% 表示缩小 10%，整体与横纵缩放叠加。每次插入重新随机，插入后固定；范围过大可能重叠或越界。</p>
+                        </details>
                         <div className="text-layout-options"><label className="paper-field">文字排版<select className="text-input" value={textPlacement} onChange={e => setTextPlacement(e.target.value as "free" | "lines")}><option value="free">自由排版</option><option value="lines">沿背景横线排版</option></select></label>
                           {textPlacement === "lines" && (background?.processed && background.guide_lines?.length ? <div className="paper-fields"><label>起始横线<select className="text-input" value={lineStart} onChange={e => setLineStart(Number(e.target.value))}>{background.guide_lines.map((line, i) => <option key={line.id} value={i}>第 {guideLineNumber(line, i)} 行</option>)}</select></label><label>离横线 / mm<DraftNumberInput className="text-input" type="number" value={lineOffset} min={0} max={10} step={0.1} onChange={e => setLineOffset(Number(e.target.value))} /></label></div> : <><p className="field-note">当前页没有已确认的横线，请先设置纸张背景。</p><button className="button" onClick={() => importBackground("image")}>设置纸张背景</button></>)}
                         </div>
@@ -3049,9 +3112,11 @@ export default function App() {
                   >
                     <Minus size={15} />
                   </button>
-                  <button className="zoom-value" onClick={fitPaper}>
-                    {Math.round(zoom * 100)}%<ChevronDown size={12} />
-                  </button>
+                  <select className="zoom-value" aria-label="画布缩放比例" title="画布缩放比例（Ctrl＋滚轮）" value={Math.round(zoom * 100)} onChange={event => event.target.value === "fit" ? fitPaper() : setZoom(Number(event.target.value) / 100)}>
+                    <option value="fit">适应画布</option>
+                    {![30, 50, 75, 100, 125, 150, 200, 300, 400, 800].includes(Math.round(zoom * 100)) && <option value={Math.round(zoom * 100)}>{Math.round(zoom * 100)}%</option>}
+                    {[30, 50, 75, 100, 125, 150, 200, 300, 400, 800].map(percent => <option key={percent} value={percent}>{percent}%</option>)}
+                  </select>
                   <button
                     className="icon-button"
                     title="放大"
@@ -3117,6 +3182,7 @@ export default function App() {
                   <fieldset disabled={machineBusy} className="panel-fieldset">
                     <Toggle
                       checked={autoConnect}
+                      disabled={connecting}
                       onChange={(v) => {
                         setAutoConnect(v);
                         if (v && !connected) command({ type: "auto_connect" });
@@ -3127,7 +3193,7 @@ export default function App() {
                   <div className="port-row">
                     <select
                       aria-label="串口"
-                      disabled={machineBusy}
+                      disabled={machineBusy || connecting}
                       value={port}
                       onChange={(e) => setPort(e.target.value)}
                     >
@@ -3150,7 +3216,7 @@ export default function App() {
                   </div>
                   <button
                     className={`button full ${connected ? "" : "dark"}`}
-                    disabled={machineBusy || (!port && !connected)}
+                    disabled={machineBusy || connecting || (!port && !connected)}
                     onClick={() =>
                       command(
                         connected
@@ -3166,7 +3232,7 @@ export default function App() {
                     <div className="recover-card">
                       <button
                         className="button full"
-                        disabled={!port || recovering || positioning || !!connected && running}
+                        disabled={!port || connecting || recovering || positioning || !!connected && running}
                         onClick={recoverConnection}
                       >
                         {recovering ? (
@@ -3993,6 +4059,8 @@ export default function App() {
                 )}
                 {modal === "settings" && (
                   <>
+                    <Toggle label="X/Y 轴对调" checked={swapXY} onChange={changeSwapXY} disabled={!!connected || connecting || machineBusy} />
+                    <p className="field-note">按机型交换控制器的 X/Y 轴，书写和点动方向一起调整。此设置保存在本机；请断开连接后修改，再重新校准。</p>
                     <p className="modal-description">
                       SVG 原生解析。PDF / 图片与字体中心线转换使用本机 Python 和
                       AutoTrace。

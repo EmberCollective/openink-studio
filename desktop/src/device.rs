@@ -49,8 +49,8 @@ fn valid_z_down(depth: f64) -> bool {
 #[derive(Debug)]
 pub enum DeviceCommand {
     Scan,
-    AutoConnect,
-    Connect(String),
+    AutoConnect { swap_xy: bool },
+    Connect { port: String, swap_xy: bool },
     Disconnect,
     Jog {
         x: f64,
@@ -64,7 +64,7 @@ pub enum DeviceCommand {
     Pause,
     Resume,
     Stop,
-    Recover(String),
+    Recover { port: String, swap_xy: bool },
     Calibrate {
         canvas_x: f64,
         canvas_y: f64,
@@ -199,14 +199,14 @@ impl DeviceService {
                     let _=self.events.send(DeviceEvent::JobRejected{reason:"Controller recovery is in progress; submit a new job after recovery completes".into(),running:false});
                     return;
                 }
-                DeviceCommand::Recover(_)
+                DeviceCommand::Recover { .. }
                 | DeviceCommand::Jog { .. }
                 | DeviceCommand::PenUp
                 | DeviceCommand::PenDown { .. }
                 | DeviceCommand::Pause
                 | DeviceCommand::Resume
-                | DeviceCommand::Connect(_)
-                | DeviceCommand::AutoConnect => return,
+                | DeviceCommand::Connect { .. }
+                | DeviceCommand::AutoConnect { .. } => return,
                 DeviceCommand::BeginRegistration { .. }
                 | DeviceCommand::CancelRegistration
                 | DeviceCommand::FinishRegistration { .. }
@@ -242,15 +242,36 @@ impl Default for DeviceService {
     }
 }
 
-fn vector(s: &str) -> Option<[f64; 3]> {
+/// Keep planning coordinates logical; only controller axis words are exchanged.
+pub(crate) fn map_xy_axes(line: &str, swap_xy: bool) -> String {
+    if !swap_xy { return line.to_owned(); }
+    let mut bytes = line.as_bytes().to_vec();
+    let mut comment = false;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b';' => break,
+            b'(' => comment = true,
+            b')' => comment = false,
+            b'X' | b'Y' if !comment
+                && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+                && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')) => {
+                    bytes[i] = if bytes[i] == b'X' { b'Y' } else { b'X' };
+                }
+            _ => {}
+        }
+    }
+    String::from_utf8(bytes).expect("ASCII axis replacement preserves UTF-8")
+}
+
+fn vector(s: &str, swap_xy: bool) -> Option<[f64; 3]> {
     let v: Vec<f64> = s
         .split(',')
         .map(str::parse)
         .collect::<Result<_, _>>()
         .ok()?;
-    (v.len() == 3 && v.iter().all(|v| v.is_finite())).then(|| [v[0], v[1], v[2]])
+    (v.len() == 3 && v.iter().all(|v| v.is_finite())).then(|| if swap_xy { [v[1], v[0], v[2]] } else { [v[0], v[1], v[2]] })
 }
-fn parse_status(s: &str, previous: &Status) -> Option<Status> {
+fn parse_status(s: &str, previous: &Status, swap_xy: bool) -> Option<Status> {
     let mut parts = s.strip_prefix('<')?.strip_suffix('>')?.split('|');
     let state = parts.next()?.to_string();
     let mut wpos = None;
@@ -258,13 +279,13 @@ fn parse_status(s: &str, previous: &Status) -> Option<Status> {
     let mut wco = previous.wco;
     for p in parts {
         if let Some(v) = p.strip_prefix("WPos:") {
-            wpos = vector(v)
+            wpos = vector(v, swap_xy)
         }
         if let Some(v) = p.strip_prefix("MPos:") {
-            mpos = vector(v)
+            mpos = vector(v, swap_xy)
         }
         if let Some(v) = p.strip_prefix("WCO:") {
-            wco = vector(v)
+            wco = vector(v, swap_xy)
         }
     }
     if wpos.is_none() {
@@ -480,9 +501,15 @@ impl<T: Read + Write + Send> Wire for T {}
 struct Link {
     port: Box<dyn Wire>,
     rx: Vec<u8>,
+    swap_xy: bool,
 }
 impl Link {
     fn write(&mut self, b: &[u8]) -> Result<(), String> {
+        if self.swap_xy {
+            if let Ok(line) = std::str::from_utf8(b) {
+                return self.port.write_all(map_xy_axes(line, true).as_bytes()).map_err(|e| e.to_string());
+            }
+        }
         self.port.write_all(b).map_err(|e| e.to_string())
     }
     fn lines(&mut self) -> Result<Vec<String>, String> {
@@ -530,7 +557,7 @@ fn handshake_failure(
     };
     format!("Read-only GRBL handshake incomplete (missing: {}; controller state: {state}; received: {received}). Port closed without reset/unlock/resume. A previous hold may retain queued motion; inspect the machine before any explicit recovery",missing.join(", "))
 }
-fn open_link(name: &str) -> Result<Link, String> {
+fn open_link(name: &str, swap_xy: bool) -> Result<Link, String> {
     let mut port = serialport::new(name, 115200)
         .data_bits(serialport::DataBits::Eight)
         .parity(serialport::Parity::None)
@@ -545,11 +572,11 @@ fn open_link(name: &str) -> Result<Link, String> {
         .map_err(|e| e.to_string())?;
     Ok(Link {
         port: Box::new(port),
-        rx: vec![],
+        rx: vec![], swap_xy,
     })
 }
-fn connect(name: &str) -> Result<(Link, Status), String> {
-    let l = open_link(name)?;
+fn connect(name: &str, swap_xy: bool) -> Result<(Link, Status), String> {
+    let l = open_link(name, swap_xy)?;
     // Recovery starts with realtime status only, so a retained Hold cannot
     // swallow an identity query. Never resume the abandoned planner queue.
     let (l, _) = recover_session(l, Duration::from_secs(3), false, true)?;
@@ -591,7 +618,7 @@ fn prepare_line_cancel(
                 return Err(format!("Preparation interrupted: {reply}"));
             } else if reply.starts_with("[GC:") {
                 g54 = reports_g54(&reply);
-            } else if let Some(s) = parse_status(&reply, status) {
+            } else if let Some(s) = parse_status(&reply, status, l.swap_xy) {
                 *status = s;
                 if ack_before_batch && status.state == "Idle" {
                     if line == "$G" && !g54 {
@@ -635,7 +662,7 @@ fn wait_prepared_position(
         while Instant::now() < query_end {
             check_preparation_cancel(cancel)?;
             for reply in l.lines()? {
-                if let Some(s) = parse_status(&reply, status) {
+                if let Some(s) = parse_status(&reply, status, l.swap_xy) {
                     *status = s;
                     if status.state == "Idle" && matches(status) {
                         return Ok(());
@@ -768,7 +795,7 @@ fn handshake(mut l: Link, timeout: Duration) -> Result<(Link, Status), String> {
             if s.starts_with("error:") || s.starts_with("ALARM:") {
                 return Err(format!("GRBL rejected the read-only connection query: {s}. No reset, unlock or resume was sent; inspect any retained hold/alarm before recovery"));
             }
-            if let Some(st) = parse_status(&s, &status.clone().unwrap_or_default()) {
+            if let Some(st) = parse_status(&s, &status.clone().unwrap_or_default(), l.swap_xy) {
                 status = Some(st)
             }
         }
@@ -900,7 +927,7 @@ fn recover_session_impl(
                     "Recovery refused while controller reports {line}; no unlock or reset was sent"
                 ));
             }
-            if let Some(status) = parse_status(&line, &latest) {
+            if let Some(status) = parse_status(&line, &latest, l.swap_xy) {
                 latest = status.clone();
                 last_state = status.state.clone();
                 // Only the last status in this read batch can authorize a
@@ -1083,6 +1110,7 @@ fn worker_loop(
     let emit = |e| {
         let _ = events.send(e);
     };
+    let mut swap_xy = initial.as_ref().is_some_and(|(link, _)| link.swap_xy);
     let mut link: Option<Link> = None;
     let mut connected_port: Option<String> = initial_port;
     let mut calibration = initial_calibration;
@@ -1131,10 +1159,12 @@ fn worker_loop(
                     Ok(p) => emit(DeviceEvent::Ports(p)),
                     Err(e) => emit(DeviceEvent::Error(e)),
                 },
-                DeviceCommand::Connect(_) | DeviceCommand::AutoConnect if link.is_some() => emit(
+                DeviceCommand::Connect { .. } | DeviceCommand::AutoConnect { .. } if link.is_some() => emit(
                     DeviceEvent::Error("Disconnect before connecting again".into()),
                 ),
-                DeviceCommand::Connect(name) => match connect(&name) {
+                DeviceCommand::Connect { port: name, swap_xy: requested } => {
+                    swap_xy = requested;
+                    match connect(&name, swap_xy) {
                     Ok((l, s)) => {
                         link = Some(l);
                         connected_port = Some(name.clone());
@@ -1150,15 +1180,18 @@ fn worker_loop(
                         emit(DeviceEvent::Status(s));
                     }
                     Err(e) => emit(DeviceEvent::Error(e)),
-                },
-                DeviceCommand::AutoConnect => match DeviceService::ports() {
+                    }
+                }
+                DeviceCommand::AutoConnect { swap_xy: requested } => {
+                    swap_xy = requested;
+                    match DeviceService::ports() {
                     Ok(p) => {
                         let candidates: Vec<_> = p.into_iter().filter(|p| p.preferred).collect();
                         if candidates.len() != 1 {
                             emit(DeviceEvent::Error("Select a port explicitly: automatic matching requires exactly one CH340 candidate".into()))
                         } else {
                             let name = &candidates[0].name;
-                            match connect(name) {
+                            match connect(name, swap_xy) {
                                 Ok((l, s)) => {
                                     link = Some(l);
                                     connected_port = Some(name.clone());
@@ -1178,7 +1211,8 @@ fn worker_loop(
                         }
                     }
                     Err(e) => emit(DeviceEvent::Error(e)),
-                },
+                    }
+                }
                 DeviceCommand::Disconnect => {
                     let needs_hold = running
                         || positioning_operation.is_some()
@@ -1209,7 +1243,7 @@ fn worker_loop(
                     emit(DeviceEvent::CalibrationChanged { origin: None });
                     emit(DeviceEvent::Disconnected)
                 }
-                DeviceCommand::Stop | DeviceCommand::Recover(_) => {
+                DeviceCommand::Stop | DeviceCommand::Recover { .. } => {
                     let is_stop = matches!(c, DeviceCommand::Stop);
                     if is_stop && link.is_none() {
                         emit(DeviceEvent::Error("Cannot stop an offline session: use explicit recovery to discard the controller's old job and reconnect".into()));
@@ -1217,7 +1251,15 @@ fn worker_loop(
                         continue;
                     }
                     let target = match c {
-                        DeviceCommand::Recover(name) => Some(name),
+                        DeviceCommand::Recover { port: name, swap_xy: requested } => {
+                            if link.is_some() && requested != swap_xy {
+                                emit(DeviceEvent::Error("Disconnect before changing the controller axis mapping".into()));
+                                emit(DeviceEvent::Recovering(false));
+                                continue;
+                            }
+                            swap_xy = requested;
+                            Some(name)
+                        },
                         _ => connected_port.clone(),
                     };
                     if !is_stop
@@ -1261,7 +1303,7 @@ fn worker_loop(
                     modal = false;
                     let old_link = match link.take() {
                         Some(l) => Ok(l),
-                        None => open_link(target.as_deref().unwrap_or("")),
+                        None => open_link(target.as_deref().unwrap_or(""), swap_xy),
                     };
                     let result = old_link.and_then(|l| {
                         if stop_jog {
@@ -1893,7 +1935,7 @@ fn worker_loop(
 
                             }
                         }
-                        if let Some(st) = parse_status(&s, &status) {
+                        if let Some(st) = parse_status(&s, &status, l.swap_xy) {
                             status = st.clone();
                             emit(DeviceEvent::Status(st));
                             if status.state.starts_with("Alarm") {
@@ -2224,7 +2266,7 @@ fn worker_loop(
             }
             if fault.is_none() && !paused && pending.is_none() {
                 if let Some(line) = queue.pop_front() {
-                    emit(DeviceEvent::Log(format!("> {line}")));
+                    emit(DeviceEvent::Log(format!("> {}", map_xy_axes(&line, l.swap_xy))));
                     match l.write(format!("{line}\n").as_bytes()) {
                         Ok(()) => pending = Some(Instant::now()),
                         Err(e) => fault = Some(e),
@@ -2289,7 +2331,7 @@ fn worker_loop(
                         )
                     });
                 let result = attempt.or_else(|_| {
-                    open_link(&name).and_then(|l| {
+                    open_link(&name, swap_xy).and_then(|l| {
                         recover_session_with_reference(
                             l,
                             Duration::from_secs(3),
@@ -2424,10 +2466,42 @@ mod tests {
     }
     #[test]
     fn status_preserves_wco_and_reports_mm() {
-        let s = parse_status("<Idle|MPos:1,2,4|WCO:0,0,0>", &Status::default()).unwrap();
+        let s = parse_status("<Idle|MPos:1,2,4|WCO:0,0,0>", &Status::default(), false).unwrap();
         assert_eq!(s.position, Some([1.0, 2.0, 4.0]));
-        let next = parse_status("<Run|MPos:3,4,0>", &s).unwrap();
+        let next = parse_status("<Run|MPos:3,4,0>", &s, false).unwrap();
         assert_eq!(next.position, Some([3.0, 4.0, 0.0]));
+    }
+    #[test]
+    fn axis_mapping_preserves_control_words_pen_and_comments() {
+        for (logical, wire) in [
+            ("G1 X12.500 Y-42.250 Z4 F300", "G1 Y12.500 X-42.250 Z4 F300"),
+            ("$J=G91 G21 X0.000 Y1.000 F1500", "$J=G91 G21 Y0.000 X1.000 F1500"),
+            ("G10 L20 P1 X10 Y70 Z0", "G10 L20 P1 Y10 X70 Z0"),
+            ("G1 X+2.000\nG1 Y-.5", "G1 Y+2.000\nG1 X-.5"),
+            ("$X\n?\n!~", "$X\n?\n!~"),
+            ("G1 X2 (Y3) ; X4", "G1 Y2 (Y3) ; X4"),
+        ] {
+            assert_eq!(map_xy_axes(logical, false), logical);
+            assert_eq!(map_xy_axes(logical, true), wire);
+            assert_eq!(map_xy_axes(wire, true), logical);
+        }
+        let output = Arc::new(std::sync::Mutex::new(vec![]));
+        let mut link = Link { port: Box::new(MockWire { input: std::io::Cursor::new(vec![]), output: output.clone() }), rx: vec![], swap_xy: true };
+        link.write(b"G1 X12 Y-42 Z4 F300\n").unwrap();
+        link.write(b"!\x85\x18").unwrap();
+        assert_eq!(output.lock().unwrap().as_slice(), b"G1 Y12 X-42 Z4 F300\n!\x85\x18");
+    }
+    #[test]
+    fn swapped_status_keeps_intermittent_offsets_in_logical_axes() {
+        let first = parse_status("<Idle|MPos:40,15,9|WCO:30,5,9>", &Status::default(), true).unwrap();
+        assert_eq!(first.position, Some([10.,10.,0.]));
+        assert_eq!(first.wco, Some([5.,30.,9.]));
+        let next = parse_status("<Run|MPos:50,17,13>", &first, true).unwrap();
+        assert_eq!(next.position, Some([12.,20.,4.]));
+        assert_eq!(next.wco, first.wco);
+        let work = parse_status("<Idle|WPos:-290,200,0>", &next, true).unwrap();
+        assert_eq!(work.position, Some([200.,-290.,0.]));
+        assert_eq!(work.wco, first.wco);
     }
     struct MockWire {
         input: std::io::Cursor<Vec<u8>>,
@@ -2455,7 +2529,7 @@ mod tests {
                 input: std::io::Cursor::new(b"ok\r\n<Idle|WPos:0,0,0|WCO:0,0,0>\r\n".to_vec()),
                 output: output.clone(),
             }),
-            rx: vec![],
+            rx: vec![], swap_xy: false,
         };
         assert_eq!(
             l.lines().unwrap(),
@@ -2605,7 +2679,7 @@ mod tests {
                 commands,
                 events,
                 Some((
-                    Link { port, rx: vec![] },
+                    Link { port, rx: vec![], swap_xy: false },
                     Status {
                         state: "Idle".into(),
                         position: Some([0.0; 3]),
@@ -2782,7 +2856,7 @@ mod tests {
                 omit_wco_reports: 0,
                 modal_report: "[GC:G0 G54 G17 G21 G90 G94]",
             }),
-            rx: vec![],
+            rx: vec![], swap_xy: false,
         };
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
@@ -2919,7 +2993,7 @@ mod tests {
                 Some((
                     Link {
                         port: Box::new(wire),
-                        rx: vec![],
+                        rx: vec![], swap_xy: false,
                     },
                     Status {
                         state: "Idle".into(),
@@ -2976,7 +3050,7 @@ mod tests {
                 Some((
                     Link {
                         port: Box::new(wire),
-                        rx: vec![],
+                        rx: vec![], swap_xy: false,
                     },
                     initial_status,
                 )),
@@ -3087,7 +3161,7 @@ mod tests {
     fn registration_confirmation_lifts_from_pen_down_before_sampling_xy() {
         let wire = PositionWire::new();
         let trace = wire.trace.clone();
-        let mut l = Link { port: Box::new(wire), rx: vec![] };
+        let mut l = Link { port: Box::new(wire), rx: vec![], swap_xy: false };
         let mut status = Status {
             state: "Idle".into(),
             position: Some([15., 25., 3.5]),
@@ -3111,7 +3185,7 @@ mod tests {
         let trace = wire.trace.clone();
         let mut l = Link {
             port: Box::new(wire),
-            rx: vec![],
+            rx: vec![], swap_xy: false,
         };
         let mut status = Status {
             state: "Idle".into(),
@@ -3331,7 +3405,7 @@ mod tests {
                 identity,
                 ack,
             }),
-            rx: vec![],
+            rx: vec![], swap_xy: false,
         };
         let result = handshake(link, Duration::from_millis(30)).map(|(_, status)| status);
         let output = writes.lock().unwrap().clone();
@@ -3510,7 +3584,7 @@ mod tests {
                                 y: 0.,
                                 feed: 300.,
                             },
-                            DeviceCommand::Recover("mock".into()),
+                            DeviceCommand::Recover { port: "mock".into(), swap_xy: false },
                         ] {
                             tx.send(command).unwrap();
                         }
@@ -3580,7 +3654,7 @@ mod tests {
                 Some((
                     Link {
                         port: Box::new(wire),
-                        rx: vec![],
+                        rx: vec![], swap_xy: false,
                     },
                     initial,
                 )),
@@ -3641,6 +3715,7 @@ mod tests {
             Link {
                 port: Box::new(wire),
                 rx: b"ok\n<Idle|MPos:99,99,0>\nGrbl old cached banner\n".to_vec(),
+                swap_xy: false,
             },
             Duration::from_millis(300),
             false,
@@ -3698,7 +3773,7 @@ mod tests {
         let (events, rx) = mpsc::channel();
         tx.send(DeviceCommand::Run(j)).unwrap();
         let h = thread::spawn(move || worker_inner(commands, events, Some((
-            Link { port: Box::new(wire), rx: vec![] },
+            Link { port: Box::new(wire), rx: vec![], swap_xy: false },
             Status { state: "Idle".into(), position: Some([3., 0., 0.]), wco: Some([0.; 3]) },
         ))));
         let mut completed = vec![];
@@ -3758,7 +3833,7 @@ mod tests {
                 Some((
                     Link {
                         port: Box::new(wire),
-                        rx: vec![],
+                        rx: vec![], swap_xy: false,
                     },
                     Status {
                         state: "Idle".into(),
@@ -3825,7 +3900,7 @@ mod tests {
             let result = recover_session(
                 Link {
                     port: Box::new(wire),
-                    rx: vec![],
+                    rx: vec![], swap_xy: false,
                 },
                 Duration::from_millis(50),
                 false,
@@ -3845,7 +3920,7 @@ mod tests {
         assert!(recover_session(
             Link {
                 port: Box::new(wire),
-                rx: vec![]
+                rx: vec![], swap_xy: false,
             },
             Duration::from_millis(70),
             true,
@@ -3889,7 +3964,7 @@ mod tests {
             y: 0.,
             feed: 300.,
         });
-        service.command(DeviceCommand::Recover("mock".into()));
+        service.command(DeviceCommand::Recover { port: "mock".into(), swap_xy: false });
         service.command(DeviceCommand::Stop);
         assert!(commands.try_recv().is_err());
         assert!(recovery.stop_requested.load(Ordering::SeqCst));
@@ -3906,7 +3981,7 @@ mod tests {
         let trace = wire.trace.clone();
         let mut l = Link {
             port: Box::new(wire),
-            rx: vec![],
+            rx: vec![], swap_xy: false,
         };
         let mut status = Status {
             state: "Idle".into(),
@@ -3942,7 +4017,7 @@ mod tests {
         let trace = wire.trace.clone();
         let mut l = Link {
             port: Box::new(wire),
-            rx: vec![],
+            rx: vec![], swap_xy: false,
         };
         let mut status = Status {
             state: "Idle".into(),
@@ -4144,7 +4219,7 @@ mod tests {
                     Some((
                         Link {
                             port: Box::new(wire),
-                            rx: vec![],
+                            rx: vec![], swap_xy: false,
                         },
                         Status {
                             state: "Idle".into(),
@@ -4218,7 +4293,7 @@ mod tests {
         assert!(recover_session_with_reference(
             Link {
                 port: Box::new(first),
-                rx: vec![]
+                rx: vec![], swap_xy: false,
             },
             Duration::from_millis(30),
             false,
@@ -4235,7 +4310,7 @@ mod tests {
         let (_, status) = recover_session_with_reference(
             Link {
                 port: Box::new(second),
-                rx: vec![],
+                rx: vec![], swap_xy: false,
             },
             Duration::from_millis(100),
             false,
@@ -4263,7 +4338,7 @@ mod tests {
             let (_, status) = recover_session(
                 Link {
                     port: Box::new(wire),
-                    rx: vec![],
+                    rx: vec![], swap_xy: false,
                 },
                 Duration::from_secs(1),
                 false,
@@ -4440,7 +4515,7 @@ mod tests {
                 } else {
                     None
                 };
-            } else if line.starts_with("G1 G90 X") {
+            } else if line.starts_with("G1 G90 X") || line.starts_with("G1 G90 Y") {
                 assert!(
                     self.z_move.is_none(),
                     "XY positioning started before a fresh raised-Z0 Idle report"
@@ -4477,9 +4552,14 @@ mod tests {
         Receiver<DeviceEvent>,
         thread::JoinHandle<()>,
     ) {
+        position_worker_with_axes(wire, false)
+    }
+    fn position_worker_with_axes(wire: PositionWire, swap_xy: bool) -> (
+        Sender<DeviceCommand>, Receiver<DeviceEvent>, thread::JoinHandle<()>,
+    ) {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
-        let initial = Status {
+        let mut initial = Status {
             state: "Idle".into(),
             position: Some([
                 wire.mpos[0] - wire.wco[0],
@@ -4488,6 +4568,10 @@ mod tests {
             ]),
             wco: Some(wire.wco),
         };
+        if swap_xy {
+            initial.position.as_mut().unwrap().swap(0, 1);
+            initial.wco.as_mut().unwrap().swap(0, 1);
+        }
         let h = thread::spawn(move || {
             worker_loop(
                 commands,
@@ -4495,7 +4579,7 @@ mod tests {
                 Some((
                     Link {
                         port: Box::new(wire),
-                        rx: vec![],
+                        rx: vec![], swap_xy,
                     },
                     initial,
                 )),
@@ -4505,6 +4589,84 @@ mod tests {
             )
         });
         (tx, rx, h)
+    }
+    #[test]
+    fn swapped_axes_calibration_jog_mapping_and_job_complete_in_logical_space() {
+        let wire = PositionWire::new();
+        let trace = wire.trace.clone();
+        let (tx, rx, handle) = position_worker_with_axes(wire, true);
+        calibrate_mock(&tx, &rx);
+        assert!(trace.lock().unwrap().iter().any(|line| line == "> G10 L20 P1 Y10.000 X70.000 Z0"));
+        tx.send(DeviceCommand::Jog { x: 1., y: -2., feed: 1200. }).unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                DeviceEvent::Status(s) if s.position == Some([11.,68.,0.]) => break,
+                DeviceEvent::Error(e) => panic!("{e}"), _ => {}
+            }
+        }
+        assert!(trace.lock().unwrap().iter().any(|line| line == "> $J=G91 G21 Y1.000 X-2.000 F1200"));
+        tx.send(DeviceCommand::BeginRegistration { canvas_x:20.,canvas_y:30.,preserve_scale:None }).unwrap();
+        wait_positioning_done(&rx);
+        tx.send(DeviceCommand::MoveTo { canvas_x:120.,canvas_y:30.,feed:1500. }).unwrap();
+        assert_eq!(wait_positioning_done(&rx).position, Some([100.,0.,0.]));
+        tx.send(DeviceCommand::FinishRegistration { canvas_x:120.,canvas_y:30. }).unwrap();
+        let mut registered = false;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                DeviceEvent::RegistrationChanged {scale,rotation_deg,..} => { assert!((scale-1.).abs()<1e-9 && rotation_deg.abs()<1e-9); registered=true; },
+                DeviceEvent::Positioning(false) => { assert!(registered); break; },
+                DeviceEvent::Error(e) => panic!("{e}"), _ => {}
+            }
+        }
+        // Long logical Y remains legal even though it uses the controller's X axis.
+        tx.send(DeviceCommand::MoveTo { canvas_x:20.,canvas_y:320.,feed:1500. }).unwrap();
+        assert_eq!(wait_positioning_done(&rx).position, Some([0.,-290.,0.]));
+        assert!(trace.lock().unwrap().iter().any(|line| line == "> G1 G90 Y0.000 X-290.000 F1500"));
+        let mut drawing = job();
+        drawing.document.strokes = vec![vec![Point {x:20.,y:30.},Point{x:30.,y:40.}]];
+        tx.send(DeviceCommand::Run(drawing)).unwrap();
+        let mut completed = false;
+        let mut last = None;
+        while !completed {
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                DeviceEvent::Status(s) => last=s.position,
+                DeviceEvent::Completed => completed=true,
+                DeviceEvent::Error(e) | DeviceEvent::JobRejected {reason:e,..} => panic!("{e}"), _=>{}
+            }
+        }
+        assert_eq!(last, Some([10.,-10.,0.]));
+        assert!(trace.lock().unwrap().iter().any(|line| line == "> G1 Y10.000 X-10.000 F1200"));
+        let before = trace.lock().unwrap().iter().filter(|line|line.starts_with("> G1")).count();
+        tx.send(DeviceCommand::MoveTo { canvas_x:231.,canvas_y:30.,feed:1500. }).unwrap();
+        loop { if let DeviceEvent::Error(e)=rx.recv_timeout(Duration::from_secs(3)).unwrap() {assert!(e.contains("A4"));break} }
+        assert_eq!(trace.lock().unwrap().iter().filter(|line|line.starts_with("> G1")).count(), before);
+        // A recovery request cannot silently replace the active session's mapping.
+        tx.send(DeviceCommand::Recover {port:"mock".into(),swap_xy:false}).unwrap();
+        loop { if let DeviceEvent::Error(e)=rx.recv_timeout(Duration::from_secs(3)).unwrap() {assert!(e.contains("axis mapping"));break} }
+        drop(tx); handle.join().unwrap();
+    }
+    #[test]
+    fn swapped_three_point_registration_preserves_orientation_and_recovery_mapping() {
+        let (tx,rx,handle)=position_worker_with_axes(PositionWire::new(),true);
+        tx.send(DeviceCommand::BeginRegistration {canvas_x:20.,canvas_y:30.,preserve_scale:None}).unwrap();
+        wait_positioning_done(&rx);
+        tx.send(DeviceCommand::MoveTo {canvas_x:120.,canvas_y:30.,feed:1500.}).unwrap();
+        wait_positioning_done(&rx);
+        tx.send(DeviceCommand::CaptureRegistrationSecond {canvas_x:120.,canvas_y:30.}).unwrap();
+        wait_positioning_done(&rx);
+        tx.send(DeviceCommand::MoveTo {canvas_x:20.,canvas_y:180.,feed:1500.}).unwrap();
+        wait_positioning_done(&rx);
+        tx.send(DeviceCommand::FinishRegistrationThird {canvas_x:20.,canvas_y:180.}).unwrap();
+        let mut confirmed=false;
+        loop {match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+            DeviceEvent::RegistrationChanged {matrix:Some(m),..} => {for (a,b) in m.into_iter().zip([1.,0.,0.,1.]) {assert!((a-b).abs()<1e-9)} confirmed=true;},
+            DeviceEvent::Positioning(false) => {assert!(confirmed);break},
+            DeviceEvent::Error(e)=>panic!("{e}"),_=>{}
+        }}
+        drop(tx);handle.join().unwrap();
+        let (link,status)=recover_session(Link {port:Box::new(RecoveryWire::new("Hold:0")),rx:vec![],swap_xy:true},Duration::from_millis(300),false,false).unwrap();
+        assert!(link.swap_xy);
+        assert_eq!(status.position,Some([0.,3.,0.]));
     }
     fn calibrate_mock(tx: &Sender<DeviceCommand>, rx: &Receiver<DeviceEvent>) {
         tx.send(DeviceCommand::Calibrate {
@@ -4579,7 +4741,7 @@ mod tests {
     fn registration_keeps_first_point_origin_and_rejects_unverified_state() {
         for registration in [Registration { scale: 1.2, rotation_deg: 17., matrix: None }, Registration { scale: 1.1, rotation_deg: 0., matrix: Some([1.1, 0.1, -0.1, 0.9]) }] {
             let wire = PositionWire::new(); let trace = wire.trace.clone();
-            let mut link = Link { port: Box::new(wire), rx: vec![] };
+            let mut link = Link { port: Box::new(wire), rx: vec![], swap_xy: false };
             let mut status = Status { state: "Idle".into(), position: Some([15., 25., 3.5]), wco: Some([0.; 3]) };
             let cancel = AtomicBool::new(false);
             let mut confirmed = prepare_origin(&mut link, &mut status, [20., 30.], &cancel).unwrap();

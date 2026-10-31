@@ -126,7 +126,7 @@ fn write_legacy(args: &[String]) -> Result<Value, String> {
         event_path: &event_path,
         disconnected: std::cell::Cell::new(false),
     };
-    service.command(DeviceCommand::Connect(port.clone()));
+    service.command(DeviceCommand::Connect { port: port.clone(), swap_xy: false });
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut phase = 0;
     let mut connected = false;
@@ -222,7 +222,7 @@ fn check_connection(port: String) -> Result<Value, String> {
     use crate::device::{DeviceCommand, DeviceEvent, DeviceService};
     use std::time::{Duration, Instant};
     let service = DeviceService::new();
-    service.command(DeviceCommand::Connect(port.clone()));
+    service.command(DeviceCommand::Connect { port: port.clone(), swap_xy: false });
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut connected = false;
     let mut status = None;
