@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod text_rules;
 mod commands;
 mod clipboard;
 mod project;
@@ -67,10 +68,10 @@ fn main() {
             commands::glyph_font_document
             ];
             #[cfg(feature = "private-gfont")]
-            let private_handler: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![commands::list_legacy_fonts, commands::import_legacy_fonts, commands::legacy_font_document];
+            let private_handler: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![commands::list_legacy_fonts, commands::import_legacy_fonts, commands::delete_legacy_font, commands::legacy_font_document];
             move |invoke: tauri::ipc::Invoke| {
                 #[cfg(feature = "private-gfont")]
-                if matches!(invoke.message.command(), "list_legacy_fonts" | "import_legacy_fonts" | "legacy_font_document") {
+                if matches!(invoke.message.command(), "list_legacy_fonts" | "import_legacy_fonts" | "delete_legacy_font" | "legacy_font_document") {
                     return private_handler(invoke);
                 }
                 public_handler(invoke)

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   boundsOf,
+  bottomGuideOffset,
   selectByRectangle,
   movePaths,
   rotatePaths,
@@ -14,6 +15,24 @@ import {
   resizeFromHandle,
   rotationFromPointer,
 } from "./editorGeometry.ts";
+test("guide snapping uses the whole selection ink bottom and preserves unrelated strokes", () => {
+  const doc={name:"snap",width_mm:100,height_mm:100,strokes:[[{x:10,y:10},{x:20,y:24}],[{x:30,y:30},{x:40,y:39}],[{x:70,y:80},{x:80,y:90}]]};
+  const guides=[{start:[0,40],end:[60,40]}];
+  const dy=bottomGuideOffset(doc,[0,1],2,0,guides,2);
+  assert.equal(dy,1);
+  const next=movePaths(doc,[0,1],2,dy);
+  assert.equal(boundsOf(next,[0,1]).y+boundsOf(next,[0,1]).height,40);
+  assert.deepEqual(next.strokes[2],doc.strokes[2]);
+  assert.equal(bottomGuideOffset(doc,[0],0,0,guides,2),0);
+  assert.equal(bottomGuideOffset(doc,[0,1],80,0,guides,2),0);
+  assert.equal(bottomGuideOffset(doc,[],0,3,guides,2),3);
+});
+test("sloped guides interpolate at bottom center, ignoring vertical and remote guides", () => {
+  const doc={name:"snap",width_mm:100,height_mm:100,strokes:[[{x:10,y:10},{x:30,y:22}]]};
+  assert.equal(bottomGuideOffset(doc,[0],0,0,[{start:[0,20],end:[100,30]}],2),0);
+  assert.equal(bottomGuideOffset(doc,[0],10,0,[{start:[0,20],end:[100,30]}],2),1);
+  assert.equal(bottomGuideOffset(doc,[0],0,1,[{start:[20,0],end:[20,100]}],2),1);
+});
 test("all eight handles keep opposite anchors fixed; edge midpoints change one axis", () => {
   const doc={name:"handles",width_mm:100,height_mm:100,strokes:[[{x:10,y:20},{x:30,y:40}],[{x:70,y:70},{x:80,y:80}]]};
   const box=boundsOf(doc,[0]);

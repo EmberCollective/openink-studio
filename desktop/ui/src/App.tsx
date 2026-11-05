@@ -1,3 +1,8 @@
+import { BatchPanel, BatchAssignment } from "./BatchPanel";
+import { batchesOf, batchOf, batchDocument, batchStatus, batchColors, assignBatch, cleanBatchData, replaceBatchRoute, copyBatchPage, uniquePageStrokeIds, type Batch, type BatchData } from "./batchModel";
+import { rotatedViewSize } from "./pointerGeometry";
+import { FontRulesPanel } from "./FontRulesPanel";
+import { legacyFontRule, scalarSelection, validRuleLibrary, type FontRuleLibrary, type FontRule } from "./fontRules";
 import { useProjectFiles } from "./useProjectFiles";
 import { version as appVersion } from "../../package.json";
 import { WindowControls, dragWindow } from "./WindowControls";
@@ -11,7 +16,7 @@ import Toggle from "./Toggle";
 import RegistrationHandles from "./RegistrationHandles";
 import { RegistrationPanel, type RegistrationProfile, type RegistrationSetup } from "./RegistrationPanel";
 import { identityRegistration, canvasToMachine, registrationMatrix, registrationScales, scaledRegistration, type Registration } from "./coordinateGeometry";
-import { ensureStrokeIds, unwrittenDocument, completedStrokeIds, resetWrittenSelection, markCompletedStroke, replacePendingStrokes } from "./writtenTracking";
+import { ensureStrokeIds, unwrittenDocument, completedStrokeIds, resetWrittenSelection, markCompletedStroke } from "./writtenTracking";
 import { DraftNumberInput } from "./DraftNumberInput";
 import { useRoutePlan, type RouteSnapshot } from "./useRoutePlan";
 import { RouteOverlay, inspectRouteStroke, type RouteInspection } from "./RouteOverlay";
@@ -25,7 +30,7 @@ import { applyLayoutToPages, applyScaleToPages, normalizeLayouts, resizePosition
 import { LayoutPagesDialog } from "./LayoutPagesDialog";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { useCanvasEditing } from "./CanvasEditing";
 import { useCanvasPan } from "./CanvasPan";
 import { CanvasCoordinates } from "./CanvasCoordinates";
@@ -73,7 +78,9 @@ import {
   Save,
   Settings2,
   Square,
+  Layers,
   Terminal,
+  Trash2,
   Type,
   Unplug,
   Upload,
@@ -83,7 +90,7 @@ import {
 } from "lucide-react";
 
 type Point = { x: number; y: number };
-type Document = {
+type Document = BatchData & {
   text_settings?: TextSettings;
   route_optimized?: boolean;
   materials?: { id: string; name: string; kind: string }[];
@@ -404,6 +411,9 @@ export default function App() {
   const [document, setSourceDocument] = useState<Document | null>({ name: "组合画布", width_mm: 160, height_mm: 240, strokes: [], materials: [], strokeOwners: [] }),
     [source, setSource] = useState(""),
     [pageCount, setPageCount] = useState<number | null>(null);
+  const [selectedBatch, setSelectedBatch] = useState("default");
+  const [batchReview, setBatchReview] = useState<Set<string>>(() => new Set());
+  const submittedBatch = useRef<{ page: number; id: string; document: Document } | null>(null);
   const [editedDocument, setEditedDocument] = useState<Document | null>(null);
   const [backgroundPages, setBackgroundPages] = useState<BackgroundPage[]>([]);
   const [canvasPage, setCanvasPage] = useState(0);
@@ -427,13 +437,32 @@ export default function App() {
   const [lineStart, setLineStart] = useState(0), [lineOffset, setLineOffset] = useState(0.5);
   const background = paperPreview || backgroundPages[canvasPage];
   const canvasPageCount = Math.max(1, canvasPage + 1, backgroundPages.length, ...[...pageDocuments.current.keys()].map(i => i + 1));
+  const [fontRules, setFontRules] = useState<FontRuleLibrary>({ rules: [], selected: "" });
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [ruleScope, setRuleScope] = useState<"all" | "selection">("all");
+  const [textSelection, setTextSelection] = useState<{ text: string; range: [number, number] } | null>(null);
   function captureTextSettings(): TextSettings {
     return { text, font_mode: fontMode, font_path: font, glyph_path: glyphFont, legacy_selection: legacySelection,
-      legacy_percent: legacyPercent, legacy_baseline: legacyBaseline, legacy_seed: legacySeed, centerline, jitter: textJitter,
+      legacy_percent: legacyPercent, legacy_baseline: legacyBaseline, legacy_seed: legacySeed, centerline, jitter: textJitter, font_rules: fontRules,
       placement: textPlacement, start_line: lineStart, offset: lineOffset, font_size_mm: template.font_size_mm, letter_spacing_mm: template.letter_spacing_mm };
   }
-  function restoreTextSettings(doc: Document) {
+  function restoreTextSettings(doc: Document, replaceRules = false) {
     const value = doc.text_settings;
+    setRuleScope("all"); setTextSelection(null);
+    if (validTextSettings(value) && validRuleLibrary(value.font_rules)) {
+      const saved = value.font_rules;
+      const merged = [...saved.rules.filter(r => !fontRules.rules.some(c => c.id === r.id)), ...fontRules.rules];
+      if (!replaceRules && merged.length > 50) notify("跨页规则合计超过 50 套，当前页使用本页保存的规则；其他页面的规则仍保留");
+      setFontRules(replaceRules || merged.length > 50 ? saved : { rules: merged, selected: saved.selected });
+    } else if (validTextSettings(value)) {
+      const legacy = legacyFontRule(value.jitter);
+      if (legacy) setFontRules(current => {
+        const existing = current.rules.find(r => JSON.stringify(r.general) === JSON.stringify(legacy.general));
+        const rule = existing || { ...legacy, id: crypto.randomUUID() };
+        return { rules: existing && !replaceRules ? current.rules : [...(replaceRules || current.rules.length >= 50 ? [] : current.rules), rule], selected: rule.id };
+      });
+      else if (replaceRules) setFontRules({ rules: [], selected: "" });
+    } else if (replaceRules) setFontRules({ rules: [], selected: "" });
     setTextJitter(validTextSettings(value) && value.jitter ? value.jitter : { x_mm: 0, y_mm: 0, rotation_deg: 0, scale_x_percent: 0, scale_y_percent: 0, scale_percent: 0 });
     if (!validTextSettings(value)) { setTextPlacement("free"); setLineStart(0); return; }
     setText(value.text); setFontMode(value.font_mode); setFont(value.font_path); setGlyphFont(value.glyph_path);
@@ -447,6 +476,7 @@ export default function App() {
   );
   function setDocument(next: Document | null, kind = "file", absolute = false) {
     if (!next || editingBlocked()) return;
+    if (preparedDoc && (batchStatus(preparedDoc, currentBatch.id, writtenIds) === "已完成" || batchReview.has(reviewKey))) throw new Error("当前批次已完成或需核对，请在线路中新建批次或核对后再插入");
     const id = crypto.randomUUID();
     const box = boundsOf(next);
     if (!box) return;
@@ -467,9 +497,8 @@ export default function App() {
       strokeIds: [...ensureStrokeIds(current).strokeIds!, ...placed.strokeIds!],
       strokes: [...current.strokes, ...placed.strokes],
     };
-    editor.commitAll(merged, placed.strokes.map((_, i) => current.strokes.length + i));
-    setSourceDocument(merged);
-    setEditedDocument(merged);
+    editor.commitAll(assignBatch(merged, placed.strokes.map((_, i) => current.strokes.length + i), currentBatch.id), placed.strokes.map((_, i) => current.strokes.length + i));
+
   }
   const [options, setOptions] = useState<ImportOptions>({
     page: 1,
@@ -548,6 +577,7 @@ export default function App() {
   const [writtenIds, setWrittenIds] = useState<Set<string>>(() => new Set());
   const submittedStrokes = useRef<Document | null>(null);
   const submittedOrderedIds = useRef<string[]>([]);
+  const writtenIdsRef = useRef(writtenIds); writtenIdsRef.current = writtenIds;
   const [jobLocked, setJobLocked] = useState(false);
   const jobLockRef = useRef(false);
   const submissionEpoch = useRef(0);
@@ -566,6 +596,8 @@ export default function App() {
   }
   const machineBusy = jobLocked || running || positioning || recovering;
   const connectionAttempt = useRef(false);
+  const [viewRotation, setViewRotation] = useState(0);
+  const [showGuideNumbers, setShowGuideNumbers] = useState(true);
   const [zoom, setZoom] = useState(1),
     [rotation, setRotation] = useState(0),
     [scale, setScale] = useState(1),
@@ -813,7 +845,39 @@ export default function App() {
       template.height_mm,
     ],
   );
-  const pendingDoc = useMemo(() => jobLocked && submittedStrokes.current ? submittedStrokes.current : preparedDoc ? unwrittenDocument(preparedDoc, writtenIds) : null, [preparedDoc, writtenIds, jobLocked]);
+  const pageBatches = preparedDoc ? batchesOf(preparedDoc) : [];
+  const currentBatch = pageBatches.find(b => b.id === selectedBatch) || pageBatches[0] || { id: "default", name: "本页全部内容", color: 0 };
+  const reviewKey = `${canvasPage}:${currentBatch.id}`;
+  const pendingDoc = useMemo(() => jobLocked && submittedStrokes.current ? submittedStrokes.current : preparedDoc ? unwrittenDocument(batchDocument(preparedDoc, currentBatch.id), writtenIds) : null, [preparedDoc, currentBatch.id, writtenIds, jobLocked]);
+  function recordInterruptedBatch() {
+    const active = submittedBatch.current;
+    if (active) setBatchReview(current => new Set([...current, `${active.page}:${active.id}`]));
+    submittedBatch.current = null;
+  }
+  function assignSelectionToBatch(target: string) {
+    if (!preparedDoc || editingBlocked() || busy) return;
+    if (editor.selection.some(i => batchReview.has(`${canvasPage}:${batchOf(preparedDoc, i)}`))) { notify("选区来自中断批次，请先在线路中核对该批次，再调整归属", true); return; }
+    if (editor.selection.some(i => writtenIds.has(preparedDoc.strokeIds?.[i] || ""))) { notify("选区包含已书写笔画，请先明确重置书写标记再调整批次", true); return; }
+    let next = preparedDoc;
+    if (target === "__new") {
+      if (pageBatches.length >= 200) return;
+      target = crypto.randomUUID();
+      next = { ...next, batches: [...pageBatches.map(b => b.name === "本页全部内容" ? { ...b, name: "批次 1" } : b), { id: target, name: `批次 ${pageBatches.length + 1}`, color: Math.max(...pageBatches.map(b => b.color)) + 1 }] };
+    }
+    if (batchStatus(next, target, writtenIds) === "已完成" || batchReview.has(`${canvasPage}:${target}`)) { notify("目标批次已完成或需核对，请先处理该批次，或移入新批次", true); return; }
+    editor.commitAll(assignBatch(next, editor.selection, target), editor.selection);
+    setSelectedBatch(target);
+  }
+  function changeBatches(batches: Batch[], removed?: string, target?: string) {
+    if (!preparedDoc || editingBlocked() || busy) return;
+    let next = preparedDoc;
+    if (removed && target) {
+      if (batchReview.has(`${canvasPage}:${removed}`) || batchReview.has(`${canvasPage}:${target}`)) { notify("请先核对中断批次，再移除批次", true); return; }
+      next = assignBatch(next, next.strokes.flatMap((_, i) => batchOf(next, i) === removed ? [i] : []), target);
+      setSelectedBatch(target);
+    }
+    editor.commitAll({ ...next, batches }, editor.selection);
+  }
   const extractionPrepared = useMemo(() => {
     if (!extractionDocument) return null;
     const box = boundsOf(extractionDocument);
@@ -823,6 +887,14 @@ export default function App() {
   function commitCanvas(next: Document) {
     if (editingBlocked()) return;
     next = ensureStrokeIds(next);
+    const previousIds = new Map(preparedDoc?.strokeIds?.map((id, i) => [id, i]) || []);
+    const reviewTargets = new Set<string>();
+    next.strokeIds!.forEach((id, i) => {
+      const before = previousIds.get(id);
+      if (preparedDoc && before !== undefined && batchReview.has(`${canvasPage}:${batchOf(preparedDoc, before)}`)) reviewTargets.add(`${canvasPage}:${batchOf(next, i)}`);
+    });
+    if (reviewTargets.size) setBatchReview(old => new Set([...old, ...reviewTargets]));
+    next = cleanBatchData(next);
     setSourceDocument(next);
     setEditedDocument(next);
     setRotation(0);
@@ -834,6 +906,9 @@ export default function App() {
     locked: !editPolicy.canEditDocument || !!paperWizard,
     extracting: showExtraction,
     writtenIds,
+    pasteBatch: currentBatch.id,
+    snapGuides: background?.guides_visible !== false ? background?.guide_lines : [],
+    strokeColor: rightOpen && (rightTab === "planning" || rightTab === "properties") && pageBatches.length > 1 ? (doc, i) => batchColors[(batchesOf(doc).find(b => b.id === batchOf(doc, i))?.color || 0) % batchColors.length] : undefined,
     onResetWritten: (selection) => { if (preparedDoc && !editingBlocked()) setWrittenIds((current) => resetWrittenSelection(current, preparedDoc, selection)); },
     onChange: commitCanvas,
     onMessage: notify,
@@ -911,7 +986,7 @@ export default function App() {
   }
   function applyRouteVariant(variant: RouteVariant) {
     if (editingBlocked() || !preparedDoc || routeComparisonPending || routeComparison?.key !== routeComparisonLatestKey.current || !canApplyRouteVariant(variant)) return;
-    const next: Document = { ...replacePendingStrokes(preparedDoc, { ...variant.document, strokeOwners: variant.stroke_owners }, writtenIds), route_optimized: true };
+    const next: Document = { ...replaceBatchRoute(preparedDoc, currentBatch.id, { ...variant.document, strokeOwners: variant.stroke_owners }, writtenIds), route_optimized: true };
     editor.commitAll(next);
     setModal(null);
     notify(`已应用${variant.label}，可撤销`);
@@ -975,6 +1050,8 @@ export default function App() {
   const exceeds = physicalExceeds || pageExceeds || placementExceeds;
   const runReason = machineBusy
     ? "设备正在作业或走位，编辑已锁定"
+    : batchReview.has(reviewKey)
+      ? "本批曾中断，请在线路中核对后允许重新开始"
     : !connected
       ? "请先连接设备"
       : !automaticOrigin && !machineOriginReady
@@ -988,7 +1065,7 @@ export default function App() {
           : showExtraction
                   ? "请先关闭字形提取，返回编辑作品"
                   : !pendingDoc?.strokes.some((s) => s.length > 1)
-                    ? preparedDoc?.strokes.some((s) => s.length > 1) ? "本页内容均已书写；框选后可重置书写标记" : "请先导入或生成书写路径"
+                    ? preparedDoc?.strokes.some((s) => s.length > 1) ? "当前批次没有待写内容；在线路中选择其他批次，或明确重置书写标记" : "请先导入或生成书写路径"
                     : physicalExceeds
                         ? "墨迹跨度超过当前 A4 工作范围（X 210 / Y 297 mm）"
                         : pageExceeds
@@ -1208,6 +1285,7 @@ export default function App() {
               notify(`已连接 ${e.port}`);
               break;
             case "disconnected":
+              recordInterruptedBatch();
               setConnecting(false);
               connectionAttempt.current = false;
               resetOriginLayout.current = null;
@@ -1232,11 +1310,18 @@ export default function App() {
               if (submittedStrokes.current) {
                 const ids = completedStrokeIds(submittedStrokes.current);
                 setWrittenIds((current) => new Set([...current, ...ids]));
+                const active = submittedBatch.current;
+                if (active) {
+                  const completed = new Set([...writtenIdsRef.current, ...ids]);
+                  const next = batchesOf(active.document).find(b => b.id !== active.id && batchStatus(active.document, b.id, completed) === "待书写");
+                  if (next) setSelectedBatch(next.id);
+                }
+                submittedBatch.current = null;
                 submittedStrokes.current = null;
               }
               lockJob(false);
               setRunning(false);
-              notify("控制器已完成作业，请检查纸面书写效果");
+              notify("本批已完成，机器已抬笔停稳；下一批需手动开始，请检查纸面");
               break;
             case "stroke_completed": {
               const ids = submittedOrderedIds.current;
@@ -1248,6 +1333,7 @@ export default function App() {
               setPaused(!!e.paused);
               break;
             case "stopped":
+              recordInterruptedBatch();
               setRegistrationLocked(false);
               setSessionVersion(v => v + 1);
               lockJob(false);
@@ -1259,6 +1345,7 @@ export default function App() {
             case "recovering":
               setRecovering(!!e.active);
               if (e.active) {
+                recordInterruptedBatch();
                 setMachineOriginReady(false); setConfirmedOrigin(null); setRegistration(identityRegistration);
                 if (projectCalibrationRef.current) { setAutomaticOrigin(false); setProjectNeedsAlignment(true); }
                 setRegistrationLocked(false); setSessionVersion(v => v + 1);
@@ -1317,6 +1404,7 @@ export default function App() {
               notify(e.message || "设备错误", true);
               break;
             case "job_rejected":
+              if (!e.running) submittedBatch.current = null;
               lockJob(!!e.running);
               setRunning(!!e.running);
               notify(
@@ -1360,7 +1448,8 @@ export default function App() {
   function fitPaper() {
     const el = paperHost.current;
     if (!el || el.clientWidth <= 104 || el.clientHeight <= 62) return;
-    setPaperFit(Math.min((el.clientWidth - 104) / template.width_mm, (el.clientHeight - 62) / template.height_mm));
+    const size = rotatedViewSize(template.width_mm, template.height_mm, viewRotation);
+    setPaperFit(Math.min((el.clientWidth - 104) / size.width, (el.clientHeight - 62) / size.height));
     setZoom(1);
     const scroll = el.querySelector<HTMLElement>(".paper-scroll");
     if (scroll) { scroll.scrollLeft = 0; scroll.scrollTop = 0; }
@@ -1389,6 +1478,24 @@ export default function App() {
       }
     });
   }
+  async function composeRuleText(rule: FontRule, selection: [number, number] | null, seed = crypto.getRandomValues(new Uint32Array(1))[0], sample?: { font_mode: typeof fontMode; path: string; selections: FontSelection[]; text: string }) {
+    const source = sample || { font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text };
+    if (!source.text.trim()) throw new Error("请输入文字内容后预览");
+    if (source.font_mode === "legacy" ? !source.selections.length : !source.path) throw new Error("请先选择字体");
+        if (textPlacement === "lines" && (!background?.processed || !background.guide_lines?.length)) throw new Error("请先确认纸张背景横线");
+        const margin = template.margin_mm;
+        const pitch = (template.height_mm - 2 * margin) / template.lines;
+        if (textPlacement === "free" && pitch < template.font_size_mm) throw new Error("行高小于字号，请减少行数或字号");
+        const guides = textPlacement === "lines" ? background!.guide_lines! : Array.from({ length: template.lines }, (_, i) => ({ id: `text-${i}`, start: [margin, margin + template.font_size_mm + i * pitch] as [number, number], end: [template.width_mm - margin, margin + template.font_size_mm + i * pitch] as [number, number] }));
+        const d = await call<Document>("lined_text_document", {
+          jitter: { seed }, rules: { rule, selection }, ...source,
+          size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm,
+          guide_lines: guides, start_line: textPlacement === "lines" ? lineStart : 0, baseline_offset_mm: textPlacement === "lines" ? lineOffset : 0,
+          legacy_baseline: legacyBaseline, legacy_percent: legacyPercent, legacy_seed: legacySeed,
+          centerline, options, width_mm: template.width_mm, height_mm: template.height_mm,
+        });
+    return { document: d, guides };
+  }
   async function generateText() {
     if (editingBlocked()) return;
     await work("生成文字路径", async () => {
@@ -1399,7 +1506,16 @@ export default function App() {
       if (fontMode === "glyph" && !glyphFont)
         throw new Error("请先从 PDF / 图片提取字形，或选择已有本地字库");
       if (!text.trim()) throw new Error("请输入文字内容");
-      const jitter = { ...textJitter, seed: crypto.getRandomValues(new Uint32Array(1))[0] };
+      const jitter = { x_mm: 0, y_mm: 0, rotation_deg: 0, scale_x_percent: 0, scale_y_percent: 0, scale_percent: 0, seed: crypto.getRandomValues(new Uint32Array(1))[0] };
+      const rule = fontRules.rules.find(r => r.id === fontRules.selected);
+      const selection = ruleScope === "selection" ? textSelection?.range : null;
+      if (rule && ruleScope === "selection" && (!selection || textSelection?.text !== text)) throw new Error("文字选区已失效，请重新框选输入文字；未插入文字");
+      if (rule) {
+        const { document: d } = await composeRuleText(rule, selection || null);
+        setDocument(d, fontMode, textPlacement === "lines"); setShowExtraction(false); setScale(1); setRotation(0);
+        if (fontMode === "legacy") setAllowReverse(false);
+        notify(`已应用规则“${rule.name}” · 随机结果已冻结`); return;
+      }
       if (textPlacement === "lines") {
         if (!background?.processed || !background.guide_lines?.length) throw new Error("请先完成纸张背景设置并确认横线");
         if (fontMode === "legacy" && !legacySelection.length) throw new Error("请先选择原版 gfont 字体");
@@ -1533,6 +1649,20 @@ export default function App() {
           .map((f) => ({ path: f.path, weight: 1 })),
       ]);
       notify(`已导入 ${imported.length} 个原版 gfont 字体`);
+    });
+  }
+  async function deleteLegacyFont(font: LegacyFont) {
+    if (editingBlocked()) return;
+    if (!await ask(`从字体库删除“${font.display || fileName(font.path)}”？\n将同时取消当前对此字体的选择；已有画布笔迹保留。原始导入文件不受影响，需要时可重新导入。`, { title: "删除 gfont 字体", kind: "warning" })) return;
+    if (editingBlocked()) return;
+    await work("删除原版字体", async () => {
+      await call("delete_legacy_font", { path: font.path });
+      setLegacyFonts(v => v.filter(f => f.path !== font.path));
+      setLegacySelection(v => v.filter(f => f.path !== font.path));
+      setDraftLegacySelection(v => v.filter(f => f.path !== font.path));
+      setLegacyFocus(v => v === font.path ? "" : v);
+      setLegacyMissing([]); setLegacyChoices([]);
+      notify("已从字体库删除，可重新导入；引用此字体的旧工程需重新选择字体");
     });
   }
   async function convert(path = source, page = options.page) {
@@ -1698,9 +1828,10 @@ export default function App() {
   }
   function snapshotLayoutPages(): Project["pages"] {
     const current = { ...(preparedDoc || emptyPage(currentLayout.width_mm, currentLayout.height_mm)), width_mm: currentLayout.width_mm, height_mm: currentLayout.height_mm, text_settings: { ...captureTextSettings(), font_size_mm: currentLayout.font_size_mm, letter_spacing_mm: currentLayout.letter_spacing_mm } };
-    return projectPages(current, canvasPage, pageDocuments.current, backgroundPages, currentLayout.width_mm, currentLayout.height_mm).map((page, i) => ({ ...page, layout_id: pageLayoutIds[i] || currentLayout.id }));
+    return projectPages(current, canvasPage, pageDocuments.current, backgroundPages, currentLayout.width_mm, currentLayout.height_mm).map((page, i) => ({ ...page, document: { ...cleanBatchData(page.document), writtenStrokeIds: (page.document.strokeIds || []).filter(id => writtenIds.has(id)), reviewBatchIds: batchesOf(page.document).filter(b => batchReview.has(`${i}:${b.id}`)).map(b => b.id) }, layout_id: pageLayoutIds[i] || currentLayout.id }));
   }
   function installLayoutPages(pages: Project["pages"], definitions: Layout[], index = canvasPage) {
+    setBatchReview(new Set(pages.flatMap((p, i) => (p.document.reviewBatchIds || []).map(id => `${i}:${id}`))));
     const used = definitions.filter(l => pages.some(p => p.layout_id === l.id));
     pageDocuments.current = new Map(pages.map((p, i) => [i, p.document]));
     setBackgroundPages(pages.map(p => p.background || blankBackground()));
@@ -1777,6 +1908,7 @@ export default function App() {
     setPenDraft(null);
   }
   function activatePage(next: Document, index: number, layout = layouts.find(l => l.id === pageLayoutIds[index]) || currentLayout) {
+    setSelectedBatch(batchesOf(next).find(b => batchStatus(next, b.id, writtenIds) === "待书写")?.id || batchesOf(next)[0].id);
     setCanvasPage(index); setSourceDocument(next); setEditedDocument(next);
     setTemplate(layoutTemplate(layout)); setSelectedTemplateId("");
     setRotation(0); setScale(1); setShowExtraction(false); setRouteInspection(null); restoreTextSettings(next);
@@ -1805,7 +1937,7 @@ export default function App() {
       const copied = addition.kind === "copy" ? (addition.index === canvasPage ? current : pageDocuments.current.get(addition.index)) : null;
       if (addition.kind === "copy" && !copied) throw new Error("源页面不存在");
       const next = copied ? structuredClone(copied) : emptyPage(addition.kind === "blank" ? addition.width : template.width_mm, addition.kind === "blank" ? addition.height : template.height_mm);
-      if (copied) next.strokeIds = next.strokes.map(() => crypto.randomUUID());
+      if (copied) Object.assign(next, copyBatchPage(next));
       const bg = addition.kind === "copy" ? structuredClone(backgroundPages[addition.index] || blankBackground()) : blankBackground();
       const sourceLayout = addition.kind === "copy" ? layouts.find(l => l.id === pageLayoutIds[addition.index])! : currentLayout;
       const layout: Layout = next.width_mm === sourceLayout.width_mm && next.height_mm === sourceLayout.height_mm ? sourceLayout : { ...sourceLayout, id: crypto.randomUUID(), name: "自定义版面", source: "manual", width_mm: next.width_mm, height_mm: next.height_mm, margin_mm: Math.min(sourceLayout.margin_mm, next.width_mm / 4, next.height_mm / 4), derivation: undefined };
@@ -1874,6 +2006,7 @@ export default function App() {
     }
     const request = routeRequest!;
     const frozenJob = { feed, travel_feed: travelFeed, z_feed: zFeed, z_down: zDown };
+    submittedBatch.current = { page: canvasPage, id: currentBatch.id, document: preparedDoc! };
     submittedStrokes.current = pendingDoc;
     setActiveJobDocument(preparedDoc);
     setActiveRoute(null);
@@ -1889,11 +2022,13 @@ export default function App() {
       submittedOrderedIds.current = snapshot.stroke_order.map((index) => pendingDoc?.strokeIds?.[index] || "");
       const submitted = await command({ type: "run", job: { ...frozenJob, document: snapshot.document } });
       if (!submitted && submissionEpoch.current === epoch) {
+        submittedBatch.current = null;
         lockJob(false);
         setJobTiming((state) => cancelJobTiming(state, Date.now()));
       }
     } catch (error) {
       if (submissionEpoch.current === epoch) {
+        submittedBatch.current = null;
         lockJob(false);
         setJobTiming((state) => cancelJobTiming(state, Date.now()));
         setActiveRoute(null);
@@ -1927,7 +2062,7 @@ export default function App() {
   function buildProjectSnapshot(): Project {
     const setup = registrationSetup || { points: [[template.width_mm, 0], [15, template.height_mm - 15]], show_points: true, selected_profile: "" };
     return {
-      pages: snapshotLayoutPages(), layouts,
+      pages: snapshotLayoutPages().map((page, index) => ({ ...page, document: { ...cleanBatchData(page.document), writtenStrokeIds: (page.document.strokeIds || []).filter(id => writtenIds.has(id)), reviewBatchIds: batchesOf(page.document).filter(b => batchReview.has(`${index}:${b.id}`)).map(b => b.id) } })), layouts,
       current_page: canvasPage, template: layoutTemplate(currentLayout),
       writing: { feed, travel_feed: travelFeed, z_feed: zFeed, z_down: zDown, jog_step: jogStep },
       routing: { optimize: optimizeTrajectory, allow_reverse: allowReverse, allow_gap: allowWritingGap, max_gap: maxWritingGap, deduplicate: deduplicateWriting },
@@ -1936,7 +2071,7 @@ export default function App() {
       background_visible: backgroundVisible, show_margins: showMargins,
     } satisfies Project;
   }
-  const projectSnapshot = useMemo(buildProjectSnapshot, [preparedDoc, canvasPage, backgroundPages, template, layouts, pageLayoutIds, feed, travelFeed, zFeed, zDown, jogStep, optimizeTrajectory, allowReverse, allowWritingGap, maxWritingGap, deduplicateWriting, registrationSetup, projectNeedsAlignment, projectCalibration, confirmedOrigin, originDraft, registration, registrationProfiles, options, backgroundVisible, showMargins, text, fontMode, font, glyphFont, legacySelection, legacyPercent, legacyBaseline, legacySeed, centerline, textJitter, textPlacement, lineStart, lineOffset]);
+  const projectSnapshot = useMemo(buildProjectSnapshot, [writtenIds, batchReview, preparedDoc, canvasPage, backgroundPages, template, layouts, pageLayoutIds, feed, travelFeed, zFeed, zDown, jogStep, optimizeTrajectory, allowReverse, allowWritingGap, maxWritingGap, deduplicateWriting, registrationSetup, projectNeedsAlignment, projectCalibration, confirmedOrigin, originDraft, registration, registrationProfiles, options, backgroundVisible, showMargins, text, fontMode, font, glyphFont, legacySelection, legacyPercent, legacyBaseline, legacySeed, centerline, textJitter, fontRules, textPlacement, lineStart, lineOffset]);
   const projectSnapshotRef = useRef(projectSnapshot);
   projectSnapshotRef.current = projectSnapshot;
   const files = useProjectFiles({ snapshot: projectSnapshot, path: projectPath, onPath: setProjectPath,
@@ -1964,6 +2099,7 @@ export default function App() {
     setExtractionDocument(null); setShowExtraction(false); setClipboardFiles([]);
     setPaperWizard(null); setPaperPreview(null); setPaperCalibrated(false); setPaperCalibrationStarted(false);
     setText(""); setTextPlacement("free"); setLineStart(0); setLineOffset(0.5);
+    setSelectedBatch("default"); setBatchReview(new Set()); submittedBatch.current = null;
     setWrittenIds(new Set()); setProgress({ sent: 0, total: 0 }); setJobTiming(emptyJobTiming);
     setActiveRoute(null); setRouteInspection(null); setRouteComparison(null); setRouteComparisonError("");
     notify("已新建空白工程");
@@ -1973,6 +2109,8 @@ export default function App() {
     setBusy("打开完整工程");
     try {
       const value = await call<Project>("open_project", { path: selected });
+      const identified = uniquePageStrokeIds(value.pages.map(p => p.document));
+      value.pages = value.pages.map((p, i) => ({ ...p, document: identified[i] }));
       const normalized = normalizeLayouts(value.pages, value.template, value.layouts, value.calibration.registration);
       value.pages = normalized.pages; value.layouts = normalized.layouts;
       value.template = layoutTemplate(normalized.layouts.find(l => l.id === value.pages[value.current_page]?.layout_id)!);
@@ -1989,7 +2127,7 @@ export default function App() {
       pageDocuments.current = new Map(value.pages.map((p, i) => [i, p.document]));
       setTemplate(layoutTemplate(normalized.layouts.find(l => l.id === value.pages[value.current_page].layout_id)!));
       const next = value.pages[value.current_page].document;
-      restoreTextSettings(next);
+      restoreTextSettings(next, true);
       setPaperWizard(null); setPaperPreview(null); setPaperCalibrated(false); setPaperCalibrationStarted(false);
       setSourceDocument(next); setEditedDocument(next); setCanvasPage(value.current_page);
       setBackgroundPages(value.pages.map(p => p.background || { path: "", page: 1, page_count: 1, data_url: "" }));
@@ -2011,7 +2149,10 @@ export default function App() {
       setRestoreSetup({ version: Date.now(), value: { points: calibration.points, show_points: calibration.show_points, selected_profile: candidate ? candidate.id : calibration.selected_profile } });
       setProjectRevision(v => v + 1); setProjectPath(selected);
       setRotation(0); setScale(1); setSource(""); setPageCount(null); setExtractionDocument(null); setShowExtraction(false); setClipboardFiles([]);
-      setWrittenIds(new Set()); setProgress({ sent: 0, total: 0 }); setJobTiming(emptyJobTiming); setActiveRoute(null); setRouteInspection(null); setRouteComparison(null); setRouteComparisonError("");
+      setWrittenIds(new Set(value.pages.flatMap(p => p.document.writtenStrokeIds || [])));
+      setBatchReview(new Set(value.pages.flatMap((p, i) => (p.document.reviewBatchIds || []).map(id => `${i}:${id}`))));
+      setSelectedBatch(batchesOf(next)[0].id); submittedBatch.current = null;
+      setProgress({ sent: 0, total: 0 }); setJobTiming(emptyJobTiming); setActiveRoute(null); setRouteInspection(null); setRouteComparison(null); setRouteComparisonError("");
       setLeftOpen(true); setLeftTab("board");
       notify(`已打开工程 ${fileName(selected)}；请用两点校准当前旋转，缩放比例沿用保存值`);
     } finally { setBusy(""); }
@@ -2066,6 +2207,7 @@ export default function App() {
   const pathCount = document?.strokes.length || 0;
   const paperWidth = template.width_mm * Math.max(0.2, paperFit) * zoom,
     paperHeight = template.height_mm * Math.max(0.2, paperFit) * zoom;
+  const viewSize = rotatedViewSize(paperWidth, paperHeight, viewRotation);
   return (
     <DocumentEditLock.Provider value={!editPolicy.canEditDocument}>
     <div className="studio">
@@ -2143,6 +2285,8 @@ export default function App() {
                     {background?.path && <><p className="field-note">{fileName(background.source_path || background.path)} · 第 {background.page} 页</p>
                       <Toggle checked={backgroundVisible} onChange={setBackgroundVisible} label="显示背景" />
                       {!!background.guide_lines?.length && <Toggle checked={background.guides_visible !== false} onChange={visible => setBackgroundPages(pages => pages.map((p, i) => i === canvasPage ? { ...p, guides_visible: visible } : p))} label="显示全部定位横线" />}
+                      {!!background.guide_lines?.length && <Toggle checked={showGuideNumbers} onChange={setShowGuideNumbers} label="显示横线编号" />}
+                      {!!background.guide_lines?.length && <p className="field-note">拖动内容时按笔迹底边吸附横线；按住 Alt 临时关闭吸附。</p>}
                     </>}
                   </Section>}
                   <fieldset className="panel-fieldset" disabled={!!paperWizard}><Section
@@ -2448,35 +2592,25 @@ export default function App() {
                         <Field label="编辑内容" hint={`${text.length} 字`}>
                           <textarea
                             value={text}
-                            onChange={(e) => setText(e.target.value)}
+                            onChange={(e) => { setText(e.target.value); setTextSelection(null); }}
+                            onSelect={e => { const el = e.currentTarget; const range = scalarSelection(el.value, el.selectionStart, el.selectionEnd); setTextSelection(range ? { text: el.value, range } : null); }}
                             rows={5}
                             placeholder="写下你想表达的文字…"
                           />
                         </Field>
                         <div className="field-grid"><NumberField label="字号" value={template.font_size_mm} onChange={v => updateTemplate("font_size_mm", v)} min={1} max={80} /><NumberField label="字间距" value={template.letter_spacing_mm} onChange={v => updateTemplate("letter_spacing_mm", v)} min={0} max={20} step={0.5} /></div>
-                        <details>
-                          <summary>逐字随机抖动</summary>
-                          {([
-                            ["x_mm", "水平位移", "mm", 20, 0.1],
-                            ["y_mm", "垂直位移", "mm", 20, 0.1],
-                            ["rotation_deg", "旋转角度", "°", 180, 0.5],
-                            ["scale_x_percent", "横向缩放变化", "%", 50, 1],
-                            ["scale_y_percent", "纵向缩放变化", "%", 50, 1],
-                            ["scale_percent", "整体大小变化", "%", 50, 1],
-                          ] as const).map(([key, label, unit, limit, step]) => {
-                            const minKey = `${key}_min` as const;
-                            const lower = textJitter[minKey] ?? -textJitter[key];
-                            return <div key={key} role="group" aria-label={label}>
-                              <div className="field-label">{label}</div>
-                              <div className="field-grid">
-                                <NumberField label="下限" unit={unit} value={lower} onChange={v => setTextJitter(j => ({ ...j, [minKey]: v }))} min={-limit} max={limit} step={step} />
-                                <NumberField label="上限" unit={unit} value={textJitter[key]} onChange={v => setTextJitter(j => ({ ...j, [minKey]: j[minKey] ?? -j[key], [key]: v }))} min={-limit} max={limit} step={step} />
-                              </div>
-                              {lower > textJitter[key] && <p className="inline-error">下限不能大于上限</p>}
-                            </div>;
-                          })}
-                          <p className="field-note">每个字在下限与上限之间随机取值；两端均为 0 时关闭。缩放变化 −10% 表示缩小 10%，整体与横纵缩放叠加。每次插入重新随机，插入后固定；范围过大可能重叠或越界。</p>
-                        </details>
+                        <label className="paper-field">字体规则<select className="text-input" value={fontRules.selected} onChange={e => setFontRules(r => ({ ...r, selected: e.target.value }))}><option value="">无抖动</option>{fontRules.rules.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>
+                        <button className="button full" onClick={() => setRulesOpen(true)}>设置字体规则</button>
+                        {fontRules.selected && <><label className="paper-field">本次应用范围<select className="text-input" value={ruleScope} onChange={e => setRuleScope(e.target.value as "all" | "selection")}><option value="all">本次全部文字</option><option value="selection" disabled={!textSelection && ruleScope !== "selection"}>本次选中文字</option></select></label><p className="field-note">{ruleScope === "selection" ? (textSelection?.text === text ? `已选择 ${textSelection.range[1] - textSelection.range[0]} 个字符；仅应用字符设置，不应用整行波动与首字偏移。` : "选区已失效，请重新选中文字；不会自动改为全部。") : "仅作用于本次插入，已有画布内容不变。字体与规则独立选择。"}</p></>}
+                        {rulesOpen && <FontRulesPanel library={fontRules} locked={machineBusy || !!busy} initialText={text || "山川与远方\n落笔皆有回响"} fonts={[
+                          ...fonts.map(f => ({ id: `regular:${f.path}`, name: f.name })),
+                          ...glyphFonts.map(f => ({ id: `glyph:${f.path}`, name: `${f.name} · 本地字库` })),
+                          ...(privateGfont ? legacyFonts.map(f => ({ id: `legacy:${f.path}`, name: `${f.display} · 原版 gfont` })) : []),
+                        ]} onSave={setFontRules} onPreview={(rule, seed, sample) => {
+                          const mode = sample.font ? sample.font.slice(0, sample.font.indexOf(":")) as typeof fontMode : fontMode;
+                          const path = sample.font ? sample.font.slice(sample.font.indexOf(":") + 1) : fontMode === "glyph" ? glyphFont : font;
+                          return composeRuleText(rule, null, seed, { font_mode: mode, path, selections: sample.font ? [{ path, weight: 1 }] : legacySelection, text: sample.text });
+                        }} onClose={() => setRulesOpen(false)} />}
                         <div className="text-layout-options"><label className="paper-field">文字排版<select className="text-input" value={textPlacement} onChange={e => setTextPlacement(e.target.value as "free" | "lines")}><option value="free">自由排版</option><option value="lines">沿背景横线排版</option></select></label>
                           {textPlacement === "lines" && (background?.processed && background.guide_lines?.length ? <div className="paper-fields"><label>起始横线<select className="text-input" value={lineStart} onChange={e => setLineStart(Number(e.target.value))}>{background.guide_lines.map((line, i) => <option key={line.id} value={i}>第 {guideLineNumber(line, i)} 行</option>)}</select></label><label>离横线 / mm<DraftNumberInput className="text-input" type="number" value={lineOffset} min={0} max={10} step={0.1} onChange={e => setLineOffset(Number(e.target.value))} /></label></div> : <><p className="field-note">当前页没有已确认的横线，请先设置纸张背景。</p><button className="button" onClick={() => importBackground("image")}>设置纸张背景</button></>)}
                         </div>
@@ -2868,7 +3002,7 @@ export default function App() {
                 <div className="transform-tools">
                   <RotateCw size={15} />
                   <DraftNumberInput
-                    aria-label="旋转角度"
+                    aria-label="笔迹旋转角度" title="旋转实际书写笔迹"
                     type="number"
                     value={rotation}
                     disabled={machineBusy || !!busy || showExtraction}
@@ -2921,7 +3055,7 @@ export default function App() {
 
                   <button
                     className="icon-button"
-                    title="逆时针旋转"
+                    title="笔迹逆时针旋转（改变书写方向）"
                     disabled={machineBusy || !!busy || showExtraction}
                     onClick={() => changeRotation(rotation - 90)}
                   >
@@ -2932,10 +3066,10 @@ export default function App() {
               <div className="paper-host" ref={paperHost}>
                 <div className="paper-corner-host" ref={setPaperCornerHost} hidden={!paperWizard || paperStage !== 1} />
                 <div hidden={!!paperWizard && paperStage === 1} className={`paper-scroll ${pan.panActive ? "pan-ready" : ""} ${pan.panning ? "panning" : ""}`} tabIndex={0} aria-label="画布视图区" {...pan.bind}>
-                  <CanvasPointerOverlay width={template.width_mm} height={template.height_mm} paperWidth={paperWidth} paperHeight={paperHeight} origin={coordinateOrigin} registration={registration} host={paperHost.current} onPlaceOrigin={placingOrigin ? setWorkOrigin : undefined}>
+                  <CanvasPointerOverlay width={template.width_mm} height={template.height_mm} paperWidth={viewSize.width} paperHeight={viewSize.height} origin={coordinateOrigin} registration={registration} host={paperHost.current} onPlaceOrigin={placingOrigin ? setWorkOrigin : undefined}>
                   <div
                     className="paper"
-                    style={{ width: paperWidth, height: paperHeight }}
+                    style={{ width: paperWidth, height: paperHeight, position: "absolute", left: (viewSize.width - paperWidth) / 2, top: (viewSize.height - paperHeight) / 2, transform: `rotate(${viewRotation}deg)` }}
                   >
                     <svg
                       viewBox={`0 0 ${template.width_mm} ${template.height_mm}`}
@@ -2996,7 +3130,7 @@ export default function App() {
                         {paperGuideEditor && <g className="guide-edit-layer">{guideEditor.layer}</g>}
                         {!showExtraction && background?.guides_visible !== false && visibleGuideLines?.map((line, index) => <g key={line.id} className="paper-guide" aria-label={`第 ${guideLineNumber(line, index)} 条横线`}>
                           <line className="paper-guideline" x1={line.start[0]} y1={line.start[1]} x2={line.end[0]} y2={line.end[1]} />
-                          <text className="paper-guideline-label" x={line.start[0] + 1} y={line.start[1] - 1}>{guideLineNumber(line, index)}</text>
+                          {showGuideNumbers && <text className="paper-guideline-label" x={line.start[0] + 1} y={line.start[1] - 1} style={{ fontSize: 10 * template.width_mm / paperWidth }}>{guideLineNumber(line, index)}</text>}
                         </g>)}
                         {!showExtraction && visibleRoute && <RouteOverlay snapshot={visibleRoute} selectedIndex={routeInspection?.index} />}
                         <CanvasCoordinates
@@ -3095,6 +3229,14 @@ export default function App() {
               </div>
               <div className="canvas-bottom">
                 {activeEditor.historyToolbar}
+                <div className="view-rotation" role="group" aria-label="视图旋转（不改变书写方向）">
+                  <span>视图</span>
+                  <button className="icon-button" title="视图逆时针旋转 90°" aria-label="视图逆时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value - 90) % 360)}><RotateCcw size={15} /></button>
+                  <DraftNumberInput aria-label="视图旋转角度" title="仅旋转视图，不改变书写方向" type="number" value={viewRotation} disabled={machineBusy || !!paperWizard} step={1} onChange={event => setViewRotation(Number(event.target.value) % 360)} />
+                  <span>°</span>
+                  <button className="icon-button" title="视图顺时针旋转 90°" aria-label="视图顺时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value + 90) % 360)}><RotateCw size={15} /></button>
+                  <button className="button small" disabled={viewRotation === 0 || machineBusy || !!paperWizard} onClick={() => setViewRotation(0)}>复位视图</button>
+                </div>
                 <div className="page-view-controls" role="group" aria-label="页面与视图">
               <PageNavigation page={canvasPage} count={canvasPageCount} width={template.width_mm} height={template.height_mm} disabled={!editPolicy.canEditDocument || !!paperWizard} onPage={switchCanvasPage} onAdd={addPage} />
                 <div className="zoom-control">
@@ -3138,9 +3280,11 @@ export default function App() {
               </nav>
               <div className="panel-scroll" ref={rightScroll}>
                 <div className="workspace-tab-content section selection-properties" hidden={rightTab !== "properties"}>
+                  {!paperGuideEditor && preparedDoc && editor.selection.length > 0 && <BatchAssignment document={preparedDoc} selection={editor.selection} disabled={!editPolicy.canEditDocument || !!busy || showExtraction} onAssign={assignSelectionToBatch} />}
                   {activeEditor.inspector || <div className="selection-empty"><strong>选区变换</strong><p className="field-note">在画布中选择路径后，可在这里编辑位置、尺寸和旋转。</p></div>}
                 </div>
                 <div className="workspace-tab-content" hidden={rightTab !== "planning"}>
+                {preparedDoc && <Section icon={<Layers size={17} />} title={`第 ${canvasPage + 1} 页 · 任务批次`}><BatchPanel document={preparedDoc} current={currentBatch.id} written={writtenIds} disabled={!editPolicy.canEditDocument || !!busy || showExtraction || !!paperWizard} selection={editor.selection} review={batchReview.has(reviewKey)} onSelect={setSelectedBatch} onAssign={assignSelectionToBatch} onChange={changeBatches} onReview={() => { if (editingBlocked()) return; setBatchReview(old => { const next = new Set(old); next.delete(reviewKey); return next; }); }} /></Section>}
                 {visibleRoute && routeInspection && <p className="field-note" role="status">第 {routeInspection.index} 笔 · {routeInspection.kind} · ({routeInspection.from.x.toFixed(2)}, {routeInspection.from.y.toFixed(2)}) → ({routeInspection.to.x.toFixed(2)}, {routeInspection.to.y.toFixed(2)}) · {routeInspection.distance.toFixed(2)} mm</p>}
                 <Section icon={<PenLine size={17} />} title="线路规划">
                       <button className="button" disabled={!!busy || !preparedDoc?.strokes.length} onClick={optimizeRoute}>重新计算走线</button>
@@ -3493,6 +3637,13 @@ export default function App() {
                     </button>
                   }
                 >
+                  <button className="text-button task-batch-summary" title="在线路中查看当前批次" onClick={() => {
+                    setRightOpen(true); setRightTab("planning");
+                    requestAnimationFrame(() => {
+                      const item = window.document.querySelector<HTMLButtonElement>('.batch-item[aria-pressed="true"]');
+                      item?.scrollIntoView?.({ block: "nearest" }); item?.focus({ preventScroll: true });
+                    });
+                  }}>第 {canvasPage + 1} 页 · 第 {Math.max(1, pageBatches.findIndex(b => b.id === currentBatch.id) + 1)} / {pageBatches.length || 1} 批 · {currentBatch.name}</button>
                   <button
                     className="button full code-button"
                     disabled={!document || !!busy}
@@ -3890,6 +4041,7 @@ export default function App() {
                                     />
                                   </label>
                                 )}
+                                <button className="icon-button danger-icon" disabled={!!busy || machineBusy} title="从字体库删除" aria-label={`删除字体：${f.display || fileName(f.path)}`} onClick={e => { e.stopPropagation(); void deleteLegacyFont(f); }}><Trash2 size={16} /></button>
                               </div>
                             );
                           })}

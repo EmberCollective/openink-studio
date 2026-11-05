@@ -1,4 +1,5 @@
 import { DraftNumberInput } from "./DraftNumberInput";
+import { assignBatch, batchStatus } from "./batchModel";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import {
   CheckSquare,
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 import {
   boundsOf,
+  bottomGuideOffset,
   copyPaths,
   deletePaths,
   hitStroke,
@@ -86,12 +88,18 @@ export function useCanvasEditing({
   onMessage,
   writtenIds,
   onResetWritten,
+  strokeColor,
+  pasteBatch,
+  snapGuides = [],
 }: {
   document: Drawing | null;
   sourceKey: unknown;
   locked: boolean;
   extracting: boolean;
   writtenIds?: ReadonlySet<string>;
+  strokeColor?: (document: Drawing, index: number) => string | undefined;
+  pasteBatch?: string;
+  snapGuides?: { start: [number, number]; end: [number, number] }[];
   onResetWritten?: (selection: number[]) => void;
   onChange: (d: Drawing) => void;
   onMessage: (message: string) => void;
@@ -201,7 +209,9 @@ export function useCanvasEditing({
   }
   function paste() {
     if (!document || locked || extracting || !clipboard.length) return;
+    if (pasteBatch && batchStatus(document, pasteBatch, writtenIds || new Set()) === "已完成") { onMessage("当前批次已完成，请在线路中新建批次后粘贴"); return; }
     const next = pastePaths(document, clipboard);
+    if (pasteBatch) next.document = assignBatch(next.document, next.selection, pasteBatch);
     commit(next.document, next.selection);
     onMessage(`已粘贴 ${next.selection.length} 条路径，可直接拖动定位`);
   }
@@ -303,8 +313,8 @@ export function useCanvasEditing({
     (window.document.activeElement as HTMLElement)?.blur();
     const p = point(e),
       svg = e.currentTarget.ownerSVGElement!,
-      tolerance =
-        (4 / svg.getBoundingClientRect().width) * svg.viewBox.baseVal.width;
+      matrix = svg.getScreenCTM?.(),
+      tolerance = matrix ? 4 / Math.max(.001, Math.hypot(matrix.a, matrix.b)) : 4 * svg.viewBox.baseVal.width / svg.getBoundingClientRect().width;
     const hit = hitStroke(document, p, tolerance);
     const inside =
       box &&
@@ -361,9 +371,15 @@ export function useCanvasEditing({
       setRotationPreview({ box: d.bounds, angle: degrees });
     } else if (d.kind === "move")
       setDraft(
-        movePaths(d.document, d.selection, p.x - d.start.x, p.y - d.start.y),
+        moved(d, p, e.altKey),
       );
     else setMarquee(rectangle(d.start, p));
+  }
+  function moved(d: Drag, p: Point, bypassSnap: boolean) {
+    const dx = p.x - d.start.x, dy = p.y - d.start.y;
+    const matrix = d.owner.ownerSVGElement?.getScreenCTM?.();
+    const tolerance = matrix ? 6 / Math.max(.001, Math.hypot(matrix.a, matrix.b)) : 0;
+    return movePaths(d.document, d.selection, dx, bypassSnap ? dy : bottomGuideOffset(d.document, d.selection, dx, dy, snapGuides, tolerance));
   }
   function up(e: PointerEvent<SVGGElement>) {
     const d = drag.current;
@@ -386,7 +402,7 @@ export function useCanvasEditing({
       setDraft(null);
       if (Math.hypot(p.x - d.start.x, p.y - d.start.y) > 0.01)
         commit(
-          movePaths(d.document, d.selection, p.x - d.start.x, p.y - d.start.y),
+          moved(d, p, e.altKey),
           d.selection,
         );
     } else {
@@ -412,13 +428,13 @@ export function useCanvasEditing({
           key={i}
           points={s.map((p) => `${p.x},${p.y}`).join(" ")}
           fill="none"
-          stroke={writtenIds?.has(visible.strokeIds?.[i] || "") ? "#159875" : selected.has(i) ? "#6f55df" : "#29324d"}
+          stroke={strokeColor?.(visible, i) || (writtenIds?.has(visible.strokeIds?.[i] || "") ? "#159875" : selected.has(i) ? "#6f55df" : "#29324d")}
           strokeWidth={selected.has(i) ? 0.5 : 0.28}
           strokeLinecap="round"
           strokeLinejoin="round"
         >{writtenIds?.has(visible.strokeIds?.[i] || "") && <title>已书写</title>}</polyline>
       )),
-    [visible, selection, writtenIds],
+    [visible, selection, writtenIds, strokeColor],
   );
   const layer = (
     <g

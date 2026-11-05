@@ -84,7 +84,7 @@ export async function projectChecks(){
   assert.ok(document.body.textContent?.includes('此版本不支持原版 gfont'));
   assert.deepEqual(paths(),['22,33 44,55'],'Rejected regeneration must preserve existing paths');
   assert.ok(!requests.some(r=>r.name==='legacy_font_document'||r.name==='list_legacy_fonts'));
-  await click('保存工程');assert.deepEqual(saved!.pages[0].document.text_settings,privateText,'Saving publicly must retain private text settings');
+  await click('保存工程');assert.deepEqual(saved!.pages[0].document.text_settings,{...privateText,jitter:{x_mm:0,y_mm:0,rotation_deg:0,scale_x_percent:0,scale_y_percent:0,scale_percent:0},font_rules:{rules:[],selected:""}},'Saving publicly must retain private text settings and normalize absent jitter and rule library');
   // Opening a background-only current page renders the packaged PDF before replacing state.
   value.current_page=1;await click('打开工程');assert.deepEqual(paths(),[]);assert.ok(document.querySelector('image[aria-label="PDF 背景（不可选中）"]'));
   saved=null;await click('保存工程');assert.ok(saved,'Reopened project with regenerated preview must save');assert.equal(saved!.current_page,1);assert.deepEqual(saved!.pages[0].document.strokeIds,['restored-1']);

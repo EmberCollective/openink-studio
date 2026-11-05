@@ -7,6 +7,17 @@
   font-size: 13px;
   font-synthesis: none;
 }
+.batch-list { display: grid; gap: 6px; margin-bottom: 10px; }
+.batch-item { display: flex; align-items: center; gap: 8px; text-align: left; }
+.batch-item > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.batch-item small { flex-shrink: 0; }
+.batch-item[aria-pressed="true"] { border-color: #8878ce; background: #f3f0fc; }
+.batch-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.batch-order { display: flex; gap: 8px; margin: 8px 0; }
+.batch-assignment { margin-top: 16px; }
+.batch-assignment select, .batch-panel select { width: 100%; }
+.task-batch-summary { margin: 6px 0 10px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-batch-summary { display: block; width: 100%; text-align: left; }
 * {
   box-sizing: border-box;
 }
@@ -3264,3 +3275,41 @@ select,
 .native-titlebar .window-controls .window-close:hover:not(:disabled) { background: #c42b1c; color: white; }
 .studio > .recovery-lock > .activity-rail { padding-top: 8px; }
 .layout-page-choices { max-height: 40vh; overflow-y: auto; margin: 12px 0; }
+
+.font-rules-dialog { width: min(1180px, 96vw); max-height: 92vh; overflow-y: auto; border: 1px solid #dcdfea; border-radius: 12px; padding: 20px; color: #252b42; }
+.font-rules-dialog::backdrop { background: #252b4266; }
+.font-rules-dialog header, .font-rules-dialog footer { display: flex; justify-content: space-between; gap: 12px; align-items: center; background: white; }
+.font-rules-dialog footer { position: sticky; bottom: -20px; padding: 16px 0; }
+.font-rules-dialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.font-rules-body { display: grid; grid-template-columns: 160px minmax(320px, 1fr) minmax(260px, 1fr); gap: 20px; margin-top: 16px; }
+.font-rules-list, .font-rules-settings { max-height: 62vh; overflow-y: auto; }
+.font-rules-list .button { margin-bottom: 8px; flex-direction: column; align-items: flex-start; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.font-rules-list small { display: block; font-weight: normal; margin-top: 4px; }
+.font-rules-list [aria-pressed="true"] { background: #eeeaf8; border-color: #927bc1; }
+.font-rule-columns, .font-rule-field { display: grid; grid-template-columns: minmax(140px, 1fr) 72px 72px; gap: 8px; align-items: center; margin: 10px 0; }
+.font-rule-columns { color: #757b90; font-size: 12px; }
+.font-rule-field.scalar { grid-template-columns: minmax(140px, 1fr) 152px; }
+.font-rule-field .toggle-row { margin: 0; gap: 6px; }
+.font-rule-list-item { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.font-rule-list-item .button { flex: 1; min-width: 0; margin-bottom: 0; }
+.font-rule-list-item .icon-button { flex-shrink: 0; }
+.font-rules-preview textarea { resize: vertical; min-height: 60px; }
+.font-preview-heading { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.font-rule-settings-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+.font-preview-heading [role="status"] { font-size: 12px; color: #757b90; }
+.font-preview-paper { height: 340px; border: 1px solid #e4e6ec; background: #fff; display: grid; place-items: center; padding: 16px; }
+.font-preview-paper svg { width: 100%; height: 100%; min-height: 0; }
+@media (max-width: 900px) {
+  .font-rules-body { grid-template-columns: 140px minmax(300px, 1fr); }
+  .font-rules-preview { grid-column: 1 / -1; }
+  .font-preview-paper { height: 220px; }
+}
+@media (max-width: 540px) {
+  .font-rules-body { grid-template-columns: minmax(0, 1fr); }
+  .font-rules-list { max-height: 160px; }
+}
+.font-rule-field .text-input { width: 100%; }
+
+.view-rotation { display: flex; align-items: center; gap: 3px; color: #757b90; }
+.view-rotation input { width: 46px; border: 1px solid #e4e6ec; border-radius: 4px; background: white; text-align: center; padding: 4px; }
+.canvas-pointer-wrapper > .paper { min-width: 0; min-height: 0; }

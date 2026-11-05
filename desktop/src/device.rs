@@ -269,7 +269,14 @@ fn vector(s: &str, swap_xy: bool) -> Option<[f64; 3]> {
         .map(str::parse)
         .collect::<Result<_, _>>()
         .ok()?;
-    (v.len() == 3 && v.iter().all(|v| v.is_finite())).then(|| if swap_xy { [v[1], v[0], v[2]] } else { [v[0], v[1], v[2]] })
+    // 4+-axis controllers (dual-Y gantry: X,Y,Y2,Z) report extra coordinates;
+    // keep X/Y and read Z from the last axis. shortcut: a rotary 4th axis
+    // (X,Y,Z,A) would need its own mapping, none is known in the field.
+    if !(3..=6).contains(&v.len()) || !v.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let z = v[v.len() - 1];
+    Some(if swap_xy { [v[1], v[0], z] } else { [v[0], v[1], z] })
 }
 fn parse_status(s: &str, previous: &Status, swap_xy: bool) -> Option<Status> {
     let mut parts = s.strip_prefix('<')?.strip_suffix('>')?.split('|');
@@ -1126,6 +1133,7 @@ fn worker_loop(
     let mut queue: VecDeque<String> = VecDeque::new();
     let mut pending: Option<Instant> = None;
     let mut paused = false;
+    let mut resume_pending: Option<Instant> = None;
     let mut running = false;
     let mut preflight: Option<Job> = None;
     let mut preflight_started: Option<Instant> = None;
@@ -1234,6 +1242,7 @@ fn worker_loop(
                     running = false;
                     finishing = false;
                     paused = false;
+                    resume_pending = None;
                     positioning_operation = None;
                     calibration = None;
                         registration_pending = false; registration_second = None;
@@ -1300,6 +1309,7 @@ fn worker_loop(
                     running = false;
                     finishing = false;
                     paused = false;
+                    resume_pending = None;
                     modal = false;
                     let old_link = match link.take() {
                         Some(l) => Ok(l),
@@ -1383,29 +1393,24 @@ fn worker_loop(
                             fault = Some(e)
                         }
                         paused = true;
+                        resume_pending = None;
                         emit(DeviceEvent::Paused(true));
                     }
                 }
                 DeviceCommand::Resume => {
-                    if paused && !held_after_stop {
+                    if resume_pending.is_some() {
+                        // Repeated clicks must not send another cycle-start.
+                    } else if paused && !held_after_stop && matches!(status.state.as_str(), "Hold:0" | "Idle") {
                         if let Some(l) = link.as_mut() {
                             if let Err(e) = l.write(b"~") {
                                 fault = Some(e)
+                            } else {
+                                resume_pending = Some(Instant::now());
                             }
-                            paused = false;
-                            if pending.is_some() {
-                                pending = Some(Instant::now())
-                            }
-                            if let Some(PositioningOperation::Move { started, .. }) =
-                                positioning_operation.as_mut()
-                            {
-                                *started = Instant::now();
-                            }
-                            emit(DeviceEvent::Paused(false));
                         }
                     } else {
                         emit(DeviceEvent::Error(
-                            "Resume requires a pause in this session; abandoned jobs cannot be resumed"
+                            "Resume requires a confirmed stationary pause in this session; wait for Hold:0 or Idle; abandoned jobs cannot be resumed"
                                 .into(),
                         ))
                     }
@@ -1938,6 +1943,16 @@ fn worker_loop(
                         if let Some(st) = parse_status(&s, &status, l.swap_xy) {
                             status = st.clone();
                             emit(DeviceEvent::Status(st));
+                            // A delayed Hold after '~' is still our pause, not an external interruption.
+                            if paused && resume_pending.is_some() && matches!(status.state.as_str(), "Run" | "Idle") {
+                                resume_pending = None;
+                                paused = false;
+                                if pending.is_some() { pending = Some(Instant::now()); }
+                                if let Some(PositioningOperation::Move { started, .. }) = positioning_operation.as_mut() {
+                                    *started = Instant::now();
+                                }
+                                emit(DeviceEvent::Paused(false));
+                            }
                             if status.state.starts_with("Alarm") {
                                 fault = Some("Controller is in Alarm; inspect manually".into());
                                 break;
@@ -2196,6 +2211,10 @@ fn worker_loop(
             if ack_timed_out(pending, paused, Instant::now()) {
                 fault = Some("ACK timed out; reconnect and inspect".into())
             }
+            if paused && resume_pending.is_some_and(|at| at.elapsed() > Duration::from_secs(5)) {
+                resume_pending = None;
+                emit(DeviceEvent::Error("Resume was not confirmed; the job remains paused. Inspect the controller before retrying".into()));
+            }
             if fault.is_none() && pending.is_none() && queue.is_empty() && !paused {
                 let mut fresh_position = false;
                 if let Some(operation) = positioning_operation.as_mut() {
@@ -2306,6 +2325,7 @@ fn worker_loop(
             running = false;
             finishing = false;
             paused = false;
+            resume_pending = None;
             positioning_operation = None;
             calibration = None;
                         registration_pending = false; registration_second = None;
@@ -2470,6 +2490,25 @@ mod tests {
         assert_eq!(s.position, Some([1.0, 2.0, 4.0]));
         let next = parse_status("<Run|MPos:3,4,0>", &s, false).unwrap();
         assert_eq!(next.position, Some([3.0, 4.0, 0.0]));
+    }
+    #[test]
+    fn four_axis_reports_keep_xy_and_map_z_from_last_axis() {
+        // Field report 2026-11-03: Grbl_ESP32 1.3a "ILoveLife 4axis dual Y"
+        // answers '?' with 4 coordinates (X,Y,Y2,Z); the connect gate used to
+        // reject them and time out as offline.
+        let s = parse_status(
+            "<Idle|MPos:0.000,0.000,0.000,0.000|FS:0,0|Pn:XYZ0|WCO:-189.890,-36.970,0.000,0.000>",
+            &Status::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(s.wco, Some([-189.890, -36.970, 0.0]));
+        assert_eq!(s.position, Some([189.890, 36.970, 0.0])); // WPos = MPos - WCO
+        let swapped = parse_status("<Idle|MPos:1,2,3,4|WCO:0,0,0,0>", &Status::default(), true).unwrap();
+        assert_eq!(swapped.position, Some([2.0, 1.0, 4.0]));
+        // Truncated reports must stay rejected so the gate cannot pass on noise.
+        let broken = parse_status("<Idle|MPos:1,2>", &Status::default(), false).unwrap();
+        assert!(broken.position.is_none() && broken.wco.is_none());
     }
     #[test]
     fn axis_mapping_preserves_control_words_pen_and_comments() {
@@ -4201,6 +4240,115 @@ mod tests {
                 .count(),
             1
         );
+    }
+    #[test]
+    fn resume_waits_out_delayed_hold_without_losing_calibration() {
+        struct PauseWire {
+            inner: ResponsiveWire,
+            held: bool,
+            blocked: bool,
+            resumed: bool,
+            delayed_hold: bool,
+            fault: u8,
+        }
+        impl Read for PauseWire {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.inner.read(b) }
+        }
+        impl Write for PauseWire {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                match b {
+                    b"!" => { self.held = true; self.inner.commands.lock().unwrap().push("!".into()); }
+                    b"~" => {
+                        self.resumed = true;
+                        self.inner.commands.lock().unwrap().push("~".into());
+                        // The response to the pre-resume status query can arrive after '~'.
+                        self.inner.input.extend(b"<Hold:0|WPos:0,0,0|WCO:0,0,0>\n");
+                    }
+                    b"G21\n" if !self.resumed => { self.blocked = true; }
+                    b"?" if self.held => {
+                        if !self.resumed || !self.delayed_hold {
+                            self.delayed_hold = self.resumed;
+                            self.inner.input.extend(b"<Hold:0|WPos:0,0,0|WCO:0,0,0>\n");
+                        } else if self.fault == 1 {
+                            self.inner.input.extend(b"<Hold:0|WPos:0,0,0|WCO:1,0,0>\n");
+                        } else if self.fault == 2 {
+                            self.inner.input.extend(b"Grbl 1.1h reset\n");
+                        } else {
+                            self.held = false;
+                            self.inner.input.extend(b"<Run|WPos:0,0,0|WCO:0,0,0>\n");
+                            if self.blocked { self.inner.input.extend(b"ok\n"); self.blocked = false; }
+                        }
+                    }
+                    b"?" if self.blocked => { self.inner.input.extend(b"<Run|WPos:0,0,0|WCO:0,0,0>\n"); }
+                    _ => { return self.inner.write(b); }
+                }
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        for fault in [0, 1, 2, 3] {
+            let writes = Arc::new(std::sync::Mutex::new(vec![]));
+            let wire = PauseWire {
+                inner: ResponsiveWire { input: VecDeque::new(), commands: writes.clone(), z: 0., wco: Some([0.; 3]), omit_wco_reports: 0, modal_report: "[GC:G0 G54 G17 G21 G90 G94]" },
+                held: false, blocked: false, resumed: false, delayed_hold: false, fault,
+            };
+            let (tx, commands) = mpsc::channel();
+            let (events, rx) = mpsc::channel();
+            let h = thread::spawn(move || worker_loop(commands, events,
+                Some((Link { port: Box::new(wire), rx: vec![], swap_xy: false }, Status { state: "Idle".into(), position: Some([0.; 3]), wco: Some([0.; 3]) })),
+                Arc::new(RecoveryGate::default()), Some(Calibration { origin: [0.; 2], wco: [0.; 3], registration: Registration::default() }), None));
+            tx.send(DeviceCommand::Run(job())).unwrap();
+            loop {
+                match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                    DeviceEvent::Log(s) if s == "> G21" => break,
+                    DeviceEvent::Error(e) | DeviceEvent::JobRejected { reason: e, .. } => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            tx.send(DeviceCommand::Pause).unwrap();
+            loop {
+                match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                    DeviceEvent::Status(s) if s.state == "Hold:0" => break,
+                    DeviceEvent::CalibrationChanged { origin: None } => panic!("pause invalidated calibration"),
+                    DeviceEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            if fault == 3 {
+                tx.send(DeviceCommand::Disconnect).unwrap();
+            } else {
+                tx.send(DeviceCommand::Resume).unwrap();
+                tx.send(DeviceCommand::Resume).unwrap();
+            }
+            let mut invalidated = false;
+            let mut resumed = false;
+            loop {
+                match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                    DeviceEvent::CalibrationChanged { origin: None } => { assert_ne!(fault, 0); invalidated = true; }
+                    DeviceEvent::Paused(false) => { assert_eq!(fault, 0); resumed = true; }
+                    DeviceEvent::Completed => { assert_eq!(fault, 0); assert!(resumed); break; }
+                    DeviceEvent::Disconnected => { assert_ne!(fault, 0); assert!(invalidated); break; }
+                    DeviceEvent::Error(e) if fault == 0 => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            if fault == 0 {
+                tx.send(DeviceCommand::Run(job())).unwrap();
+                loop {
+                    match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                        DeviceEvent::Completed => break,
+                        DeviceEvent::CalibrationChanged { .. } => panic!("second job changed calibration"),
+                        DeviceEvent::Error(e) | DeviceEvent::JobRejected { reason: e, .. } => panic!("{e}"),
+                        _ => {}
+                    }
+                }
+                let commands = writes.lock().unwrap();
+                assert_eq!(commands.iter().filter(|s| s.as_str() == "~").count(), 1);
+                assert!(!commands.iter().any(|s| s.contains("G10") || s.contains('\u{18}')));
+            }
+            drop(tx);
+            h.join().unwrap();
+        }
     }
     #[test]
     fn unexpected_hold_recovers_automatically_but_explicit_pause_is_preserved() {

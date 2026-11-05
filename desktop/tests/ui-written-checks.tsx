@@ -54,6 +54,9 @@ export async function writtenChecks() {
   await poll();
   assert.equal(written().length, 2, "A completion queued before stopped survives the Stop click");
   assert.equal(shapes()[0].querySelector("title"), null, "Unconfirmed interrupted stroke stays pending");
+  assert.equal(button("开始书写").disabled, true, "Interrupted batch requires explicit review before restarting");
+  await click("线路");
+  await click("已核对，允许重新开始本批");
   await click("开始书写");
   assert.equal(run().strokes.length, 1, "Restart filters only confirmed finished strokes");
   assert.equal(run().strokes[0][0].x, 10);
@@ -68,6 +71,8 @@ export async function writtenChecks() {
   await click("重置选区书写标记");
   assert.equal(written().length, 0, "Explicit reset clears color and hover labels at unchanged geometry");
   assert.deepEqual(points(), original);
+  await click("线路");
+  await click("已核对，允许重新开始本批");
   await click("开始书写");
   assert.equal(run().strokes.length, 3, "Reset makes selected content writable again");
   events.push({ type: "job_rejected", reason: "mock failure", running: false });

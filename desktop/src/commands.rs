@@ -271,6 +271,26 @@ pub async fn list_legacy_fonts() -> Result<Vec<crate::legacy_font::FontSummary>,
 }
 
 #[cfg(feature = "private-gfont")]
+pub(crate) fn delete_stored_legacy_font(store: &Path, path: &Path) -> Result<(), String> {
+    let store = store.canonicalize().map_err(|e| e.to_string())?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    let target = path.canonicalize().map_err(|e| e.to_string())?;
+    // Only imported library copies may be deleted; never follow a font symlink.
+    if !metadata.is_file() || metadata.file_type().is_symlink() || target.parent() != Some(store.as_path())
+        || !target.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("gfont")) {
+        return Err("只能删除字体库内已导入的 gfont 文件".into());
+    }
+    std::fs::remove_file(target).map_err(|e| format!("删除字体失败：{e}"))
+}
+
+#[cfg(feature = "private-gfont")]
+#[tauri::command(rename_all = "snake_case")]
+pub async fn delete_legacy_font(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_stored_legacy_font(&legacy_store()?, Path::new(&path)))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "private-gfont")]
 #[tauri::command(rename_all = "snake_case")]
 pub async fn import_legacy_fonts(
     paths: Vec<String>,

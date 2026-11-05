@@ -1,5 +1,9 @@
 export type Point = { x: number; y: number };
 export type Drawing = {
+  batches?: import("./batchModel").Batch[];
+  strokeBatches?: Record<string, string>;
+  writtenStrokeIds?: string[];
+  reviewBatchIds?: string[];
   text_settings?: import("./paperModel").TextSettings;
   name: string;
   width_mm: number;
@@ -10,6 +14,20 @@ export type Drawing = {
   strokeIds?: string[];
 };
 export type Bounds = { x: number; y: number; width: number; height: number };
+/** Snap the ink's bottom edge, in paper coordinates, rather than its center or font box. */
+export function bottomGuideOffset(doc: Drawing, ids: number[], dx: number, dy: number, guides: { start: [number, number]; end: [number, number] }[], tolerance: number): number {
+  const box = boundsOf(doc, ids);
+  if (!box) return dy;
+  const x = box.x + box.width / 2 + dx, bottom = box.y + box.height + dy;
+  let nearest = tolerance, correction = 0;
+  for (const line of guides) {
+    const [x1, y1] = line.start, [x2, y2] = line.end;
+    if (Math.abs(x2 - x1) < 1e-9 || x < Math.min(x1, x2) || x > Math.max(x1, x2)) continue;
+    const delta = y1 + (x - x1) * (y2 - y1) / (x2 - x1) - bottom;
+    if (Math.abs(delta) <= nearest) { nearest = Math.abs(delta); correction = delta; }
+  }
+  return dy + correction;
+}
 export const resizeHandles = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 export type ResizeHandle = typeof resizeHandles[number];
 export function handlePoint(box: Bounds, handle: ResizeHandle): Point {

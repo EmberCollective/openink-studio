@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { measureRoute } from "./routeMetrics";
+import { measureRoute } from "./routeMetrics.ts";
 export type RoutePoint = { x: number; y: number };
 export type RouteDocument = { name: string; width_mm: number; height_mm: number; strokes: RoutePoint[][]; materials?: { id: string; name: string; kind: string }[]; strokeOwners?: string[] };
 export type RouteRequest = { document: RouteDocument; start: RoutePoint | null; allow_reverse: boolean; travel_feed_mm_min: number; optimize?: boolean; metric_matrix?: [number, number, number, number] };

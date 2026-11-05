@@ -1,4 +1,4 @@
-import { canvasToMachine, type Registration } from "./coordinateGeometry";
+import { canvasToMachine, type Registration } from "./coordinateGeometry.ts";
 import type { RouteDocument, RoutePoint } from "./useRoutePlan";
 import type { RouteComparisonResult } from "./RouteComparison";
 

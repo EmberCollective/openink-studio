@@ -218,7 +218,10 @@ fn validate(project: &Project) -> Result<(), String> {
         if doc.strokes.is_empty() {
             if ![doc.width_mm, doc.height_mm].iter().all(|v| v.is_finite() && *v > 0. && *v <= 1000.) { return Err("空白页尺寸无效".into()); }
         } else { crate::import::validate(doc)?; }
-        let fields = ["name", "width_mm", "height_mm", "strokes", "materials", "strokeOwners", "strokeIds", "route_optimized", "text_settings"];
+        if let Some(rules) = page.document.get("text_settings").and_then(|v|v.get("font_rules")) {
+            serde_json::from_value::<crate::text_rules::RuleLibrary>(rules.clone()).map_err(|e|format!("字体规则无效：{e}"))?.validate()?;
+        }
+        let fields = ["name", "width_mm", "height_mm", "strokes", "materials", "strokeOwners", "strokeIds", "route_optimized", "text_settings", "batches", "strokeBatches", "writtenStrokeIds", "reviewBatchIds"];
         if page.document.as_object().unwrap().keys().any(|k| !fields.contains(&k.as_str())) || page.document.get("route_optimized").is_some_and(|v| !v.is_boolean()) { return Err("工程字迹字段无效".into()); }
         for key in ["strokeIds", "strokeOwners"] {
             if let Some(values) = page.document.get(key) {
@@ -227,6 +230,7 @@ fn validate(project: &Project) -> Result<(), String> {
                 if key == "strokeIds" && values.iter().map(|v| v.as_str().unwrap()).collect::<HashSet<_>>().len() != values.len() { return Err("笔画标识重复".into()); }
             }
         }
+        validate_batches(&page.document)?;
         if let Some(materials) = page.document.get("materials") {
             if !materials.as_array().is_some_and(|a| a.iter().all(|v| ["id","name","kind"].iter().all(|k| v[*k].is_string())) && a.iter().map(|v| v["id"].as_str().unwrap()).collect::<HashSet<_>>().len() == a.len()) { return Err("素材信息无效".into()); }
         }
@@ -235,6 +239,34 @@ fn validate(project: &Project) -> Result<(), String> {
 }
 
 fn json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String> { serde_json::to_vec_pretty(value).map_err(|e| e.to_string()) }
+
+fn validate_batches(doc: &Value) -> Result<(), String> {
+    let mut batches = HashSet::new();
+    if let Some(values) = doc.get("batches") {
+        let values = values.as_array().ok_or("任务批次格式无效")?;
+        if values.is_empty() || values.len() > 200 { return Err("任务批次数须为 1..200".into()); }
+        for batch in values {
+            let value = batch.as_object().ok_or("任务批次格式无效")?;
+            if value.len() != 3 || !value.keys().all(|k| ["id", "name", "color"].contains(&k.as_str())) { return Err("任务批次字段无效".into()); }
+            let id = batch["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 128).ok_or("任务批次标识无效")?;
+            if !batches.insert(id) || !batch["name"].as_str().is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 80)
+                || !batch["color"].as_u64().is_some_and(|v| v <= 1_000_000) { return Err("任务批次名称、标识或颜色无效".into()); }
+        }
+    } else { batches.insert("default"); }
+    let strokes: HashSet<_> = doc.get("strokeIds").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+    if let Some(mapping) = doc.get("strokeBatches") {
+        let mapping = mapping.as_object().ok_or("笔画批次归属无效")?;
+        if mapping.iter().any(|(id, batch)| !strokes.contains(id.as_str()) || !batch.as_str().is_some_and(|id| batches.contains(id))) { return Err("笔画引用了不存在的批次或笔画".into()); }
+    }
+    for (field, allowed) in [("writtenStrokeIds", &strokes), ("reviewBatchIds", &batches)] {
+        if let Some(values) = doc.get(field) {
+            let values = values.as_array().ok_or("书写记录格式无效")?;
+            let mut seen = HashSet::new();
+            if values.iter().any(|v| v.as_str().is_none_or(|id| !allowed.contains(id) || !seen.insert(id))) { return Err("书写记录引用无效或重复".into()); }
+        }
+    }
+    Ok(())
+}
 fn entry<W: Write + Seek>(zip: &mut ZipWriter<W>, name: &str, bytes: &[u8]) -> Result<(), String> {
     if bytes.len() as u64 > MAX_ENTRY { return Err("工程单项内容超过 128 MB".into()); }
     zip.start_file(name, SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)).map_err(|e| e.to_string())?;
@@ -401,6 +433,22 @@ pub fn startup_project_path() -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn batch_metadata_rejects_dangling_owners_and_completion() {
+        let mut doc = json!({"strokeIds":["s1"], "batches":[{"id":"b1","name":"正文","color":1}], "strokeBatches":{"s1":"b1"}, "writtenStrokeIds":["s1"], "reviewBatchIds":["b1"]});
+        assert!(validate_batches(&doc).is_ok());
+        doc["strokeBatches"]["s1"] = json!("missing");
+        assert!(validate_batches(&doc).is_err());
+        doc["strokeBatches"]["s1"] = json!("b1");
+        doc["writtenStrokeIds"] = json!(["missing"]);
+        assert!(validate_batches(&doc).is_err());
+        doc["writtenStrokeIds"] = json!(["s1", "s1"]);
+        assert!(validate_batches(&doc).is_err());
+        doc["writtenStrokeIds"] = json!([]);
+        doc["batches"][0]["color"] = json!(-1);
+        assert!(validate_batches(&doc).is_err());
+        assert!(validate_batches(&json!({"strokes":[]})).is_ok());
+    }
     fn fixture() -> Project {
         serde_json::from_value(json!({
             "pages": [{"document":{"name":"editable","width_mm":210,"height_mm":297,
@@ -419,6 +467,33 @@ mod tests {
     fn directory() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("openink-project-test-{}", nonce()));
         fs::create_dir(&dir).unwrap(); dir
+    }
+    #[test]
+    fn font_rules_roundtrip_and_invalid_rules_cannot_overwrite_project() {
+        let dir=directory();let path=dir.join("rules.inkproj");let mut value=fixture();
+        let rules=json!({"selected":"one","rules":[{"id":"one","name":"规则","general":{"size":[98,102],"left":-2,"right":-3},"overrides":[{"characters":"，。","settings":{"baseline":1}}],"first_offset":[0,1],"wave_amplitude":[0,0],"wave_length":[20,20]}]});
+        value.pages[0].document["text_settings"]["font_rules"]=rules.clone();
+        save_at(&path,value.clone()).unwrap();
+        assert_eq!(open_at(&path).unwrap().pages[0].document["text_settings"]["font_rules"],rules);
+        let before=fs::read(&path).unwrap();
+        value.pages[0].document["text_settings"]["font_rules"]["rules"][0]["general"]["size"]=json!([120,90]);
+        assert!(save_at(&path,value).is_err());assert_eq!(fs::read(&path).unwrap(),before);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn batch_roundtrip_and_invalid_reference_preserve_existing_archive() {
+        let dir=directory();let path=dir.join("batches.inkproj");let mut value=fixture();
+        value.pages[0].document["batches"]=json!([{"id":"body","name":"正文","color":2}]);
+        value.pages[0].document["strokeBatches"]=json!({"stroke-1":"body"});
+        value.pages[0].document["writtenStrokeIds"]=json!(["stroke-1"]);
+        value.pages[0].document["reviewBatchIds"]=json!(["body"]);
+        save_at(&path,value.clone()).unwrap();
+        let restored=open_at(&path).unwrap();
+        assert_eq!(restored.pages[0].document,value.pages[0].document);
+        let before=fs::read(&path).unwrap();
+        value.pages[0].document["strokeBatches"]["stroke-1"]=json!("missing");
+        assert!(save_at(&path,value).is_err());assert_eq!(fs::read(&path).unwrap(),before);
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn roundtrip_all_configs_editable_metadata_blank_pages_and_overwrite() {

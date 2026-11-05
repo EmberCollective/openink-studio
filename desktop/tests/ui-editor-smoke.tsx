@@ -1,4 +1,6 @@
 import {editorMenuChecks} from "./ui-editor-menu-checks";
+import {batchChecks} from "./ui-batch-checks";
+import {run as fontPreviewChecks} from "./ui-font-preview-checks";
 import {projectLifecycleChecks} from "./ui-project-lifecycle-checks";
 import {registrationChecks} from "./ui-registration-checks";
 import {projectChecks} from "./ui-project-checks";
@@ -307,13 +309,14 @@ async function submissionLockChecks(){
  assert.equal((document.querySelector('.left-panel fieldset') as HTMLFieldSetElement|null)?.disabled??true,true);
  events.push({type:'job_started'},{type:'paused',paused:true});await poll();locked();
  await click('停止');locked();events.push({type:'stopped'});await poll();editable();
- await act(async()=>resolveRun());editable();assert.equal(findButton('开始书写').disabled,false,'Late submission acknowledgement must not relock a cancelled task');
+ await act(async()=>resolveRun());editable();assert.equal(findButton('开始书写').disabled,true,'Stopped batch remains gated by explicit review, without relocking the editor');
+ await click('线路');await click('已核对，允许重新开始本批');assert.equal(findButton('开始书写').disabled,false,'Review permits a new run after cancellation');
  await click('开始书写');events.push({type:'job_started'},{type:'paused',paused:true},{type:'error',message:'mock uncertain device fault'},{type:'disconnected'});await poll();locked();
  assert.equal(findButton('清除旧任务并恢复连接').disabled,false,'Disconnected uncertain job must retain an explicit recovery route');
  await click('清除旧任务并恢复连接');events.push({type:'recovering',active:true},{type:'error',message:'mock failed recovery'},{type:'disconnected'},{type:'recovering',active:false});await poll();locked();
  assert.equal(findButton('清除旧任务并恢复连接').disabled,false,'Failed recovery preserves edit lock and permits retry');
  await click('清除旧任务并恢复连接');events.push({type:'recovering',active:true},{type:'stopped'},{type:'connected',port:'MOCK'},{type:'status',status:{state:'Idle',position:[0,0,0],wco:[0,0,0]}},{type:'recovering',active:false},{type:'origin_mode',automatic:false},{type:'calibration_changed',origin:[0,0]});await poll();editable();
- await act(async()=>resolveRun());await click('开始书写');events.push({type:'job_started'},{type:'completed'});await poll();editable();await act(async()=>resolveRun());editable();
+ await act(async()=>resolveRun());await click('线路');await click('已核对，允许重新开始本批');await click('开始书写');events.push({type:'job_started'},{type:'completed'});await poll();editable();await act(async()=>resolveRun());editable();
  await act(async()=>root.unmount());console.log('PASS: immediate submission lock, pause/stop/complete lifecycle, late IPC acknowledgement and failed/successful recovery lock behavior.');
 }
 async function pendingRouteStopChecks(){
@@ -419,6 +422,7 @@ async function materialCompositionChecks(){
  await act(async()=>root.unmount());console.log('PASS: multiple materials append without losing edits; insert/delete/optimization ownership and undo; mocked IPC only.');
 }
 export async function run(){
+ await fontPreviewChecks();
  await editorMenuChecks();
  await projectLifecycleChecks();
  await projectChecks();
@@ -427,6 +431,7 @@ export async function run(){
  await registrationChecks();
  calibrationChecks();
  await writtenChecks();
+ await batchChecks();
  await panChecks();
  await paperChecks();
  await backgroundChecks();
