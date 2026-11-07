@@ -1,6 +1,7 @@
 import {editorMenuChecks} from "./ui-editor-menu-checks";
 import {batchChecks} from "./ui-batch-checks";
 import {run as fontPreviewChecks} from "./ui-font-preview-checks";
+import {run as textLayoutChecks} from "./ui-text-layout-checks";
 import {projectLifecycleChecks} from "./ui-project-lifecycle-checks";
 import {registrationChecks} from "./ui-registration-checks";
 import {projectChecks} from "./ui-project-checks";
@@ -47,7 +48,7 @@ function independentCoordinateChecks(){
  console.log('PASS: independent signed coordinate fixtures, fixed-paper invariant, unknown coordinates and out-of-page direction.');
 }
 async function poll(){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,230));});}
-async function appIntegration(){
+export async function appIntegration(){
  const events:any[]=[];const requests:{name:string;args:any}[]=[];
  (globalThis as any).__openMock=async()=>'/offline/trajectory.svg';
  (globalThis as any).__invokeMock=async(name:string,args:any)=>{
@@ -88,6 +89,34 @@ async function appIntegration(){
  const preservedInput=document.querySelector('.left-panel textarea') as HTMLTextAreaElement;
  const preservedValue=preservedInput?.value;
  await act(async()=>boardTab.click());assert.equal(boardTab.getAttribute('aria-pressed'),'true');assert.equal(footerInsert.hidden,true,'Board tab does not expose material insertion action');
+ const referenceTransform=()=>document.querySelector('[data-reference="direction"]')!.getAttribute('transform')!.replace(/^translate\([^)]*\) /,'');
+ const referenceShapes=shapes();
+ const referenceCommands=requests.filter(r=>r.name==='device_command').length;
+ assert.equal(findButton('坐标系跟随画布旋转').getAttribute('aria-pressed'),'false');
+ assert.equal(findButton('显示机器虚影').getAttribute('aria-pressed'),'true');
+ const fitViewport=document.querySelector('.paper-scroll') as HTMLElement;
+ Object.defineProperties(fitViewport,{clientWidth:{value:1200,configurable:true},clientHeight:{value:800,configurable:true}});
+ fitViewport.style.padding='0px';
+ await click('适应画布');
+ const paperElement=document.querySelector('.paper') as HTMLElement;
+ const paperHeightAtFit=parseFloat(paperElement.style.height);
+ assert.ok(paperHeightAtFit>750 && paperHeightAtFit<=800,'100% fits the paper, not the large reference prototype scene');
+ await click('显示机器虚影');assert.equal(parseFloat(paperElement.style.height),paperHeightAtFit);
+ await click('显示机器虚影');
+ delete (fitViewport as any).clientWidth;delete (fitViewport as any).clientHeight;fitViewport.style.removeProperty('padding');
+ const fixedReference=referenceTransform();
+ await click('画布顺时针旋转 90°');
+ assert.equal(referenceTransform(),fixedReference,'Reference origin and axes stay fixed');
+ assert.equal((document.querySelector('.paper') as HTMLElement).style.transform,'rotate(90deg)');
+ await click('坐标系跟随画布旋转');assert.match(referenceTransform()!,/rotate\(90\)/);
+ await click('显示机器虚影');assert.equal(document.querySelector('[data-reference="ghost"]'),null);
+ assert.ok(document.querySelector('.machine-reference text'),'Hiding ghost keeps axes');
+ await number('画布旋转角度',37);assert.match(referenceTransform()!,/rotate\(37\)/);
+ await click('坐标系跟随画布旋转');assert.equal(referenceTransform(),fixedReference);
+ await click('显示机器虚影');await click('复位画布');
+ assert.equal(findButton('复位画布').disabled,true);
+ assert.deepEqual(shapes(),referenceShapes,'Display rotation never edits writing paths');
+ assert.equal(requests.filter(r=>r.name==='device_command').length,referenceCommands,'Reference controls send no device commands');
  await act(async()=>materialTab.click());assert.equal(footerInsert.hidden,false,'Returning to materials restores the insertion action');assert.equal(document.querySelector('.left-panel textarea'),preservedInput,'Tab switches retain the same input instance');assert.equal(preservedInput?.value,preservedValue);
  const leftToggle=materialTab;
  const rightToggle=()=>(document.querySelector('button[aria-label="规划与机器侧栏"]') as HTMLButtonElement).click();
@@ -129,6 +158,9 @@ async function appIntegration(){
  assert.deepEqual(sent.strokes,exported.strokes,'Queued mock Job must match exported edited geometry');
  const plannedBeforeMotion=requests.filter(r=>r.name==='optimize_document').length;
  events.push({type:'timing',total_seconds:120,cumulative_seconds:[20,120]},{type:'job_started'},{type:'progress',sent:2,total:2},{type:'status',status:{state:'Run',position:[3,-4,0],wco:[0,0,0]}});await poll();
+ assert.equal(findButton('坐标系跟随画布旋转').disabled,true);
+ assert.equal(findButton('显示机器虚影').disabled,true);
+ assert.equal(findButton('画布顺时针旋转 90°').disabled,true);
  assert.ok(document.querySelector('[aria-label="任务时间估算"]')?.textContent?.includes('预计总耗时'));assert.ok(document.querySelector('[aria-label="任务时间估算"]')?.textContent?.includes('等待设备完成'),'All ACKed commands still wait for physical device completion');
  await click('预览 CNC / G-code');
  assert.deepEqual(requests.filter(r=>r.name==='generate_gcode').at(-1)!.args.job.document.strokes,sent.strokes,'Active-job CNC must retain frozen route after pen moves');
@@ -422,6 +454,7 @@ async function materialCompositionChecks(){
  await act(async()=>root.unmount());console.log('PASS: multiple materials append without losing edits; insert/delete/optimization ownership and undo; mocked IPC only.');
 }
 export async function run(){
+ await textLayoutChecks();
  await fontPreviewChecks();
  await editorMenuChecks();
  await projectLifecycleChecks();

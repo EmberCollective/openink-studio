@@ -4,6 +4,12 @@ export function rotatedViewSize(width: number, height: number, degrees: number) 
   const angle = degrees * Math.PI / 180, c = Math.abs(Math.cos(angle)), s = Math.abs(Math.sin(angle));
   return { width: width * c + height * s, height: width * s + height * c };
 }
+export function referenceViewSize(width: number, height: number, angle = 0, follow = false) {
+  const paper = rotatedViewSize(width, height, angle);
+  // A small screen-space gap keeps the decorative reference from dictating paper zoom.
+  const reference = rotatedViewSize(width + 24, height + 24, follow ? angle : 0);
+  return { width: Math.max(paper.width, reference.width), height: Math.max(paper.height, reference.height) };
+}
 /** Affine inverse screen transform includes scroll, translation and independent X/Y zoom. */
 export function screenToCanvas(client: CanvasPointerPoint, matrix: { a: number; b: number; c: number; d: number; e: number; f: number }): CanvasPointerPoint | null {
   const { a, b, c, d, e, f } = matrix;

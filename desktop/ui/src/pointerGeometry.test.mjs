@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { screenToCanvas, pointerCoordinates, rotatedViewSize } from './pointerGeometry.ts';
+import { screenToCanvas, pointerCoordinates, referenceViewSize } from './pointerGeometry.ts';
 
 test('rotated view fits all corners and pointer inverse preserves paper coordinates', () => {
   const width=210,height=297,scale=2.5;
   for(const degrees of [0,90,-90,180,37,-150]) {
-    const size=rotatedViewSize(width,height,degrees),angle=degrees*Math.PI/180;
+    const size=referenceViewSize(width,height,degrees),angle=degrees*Math.PI/180;
     const a=scale*Math.cos(angle),b=scale*Math.sin(angle),c=-b,d=a;
     const matrix={a,b,c,d,e:100+scale*size.width/2-a*width/2-c*height/2,f:70+scale*size.height/2-b*width/2-d*height/2};
     for(const point of [{x:0,y:0},{x:width,y:0},{x:0,y:height},{x:width,y:height},{x:45,y:180}]) {
@@ -14,6 +14,18 @@ test('rotated view fits all corners and pointer inverse preserves paper coordina
       assert.ok(screen.y>=70-1e-8&&screen.y<=70+scale*size.height+1e-8);
       const restored=screenToCanvas(screen,matrix);
       assert.ok(Math.abs(restored.x-point.x)<1e-8&&Math.abs(restored.y-point.y)<1e-8);
+    }
+  }
+});
+
+test('reference adds only 12px per edge and contains rotated papers without affecting paper scale', () => {
+  assert.deepEqual(referenceViewSize(210,297),{width:234,height:321});
+  for(const [width,height] of [[210,297],[297,210],[500,20],[20,500],[500,500]]) {
+    for(let degrees=0;degrees<360;degrees+=15){
+      const size=referenceViewSize(width,height,degrees);
+      const a=degrees*Math.PI/180;
+      assert.ok(Math.abs(width*Math.cos(a))+Math.abs(height*Math.sin(a))<=size.width+1e-8);
+      assert.ok(Math.abs(width*Math.sin(a))+Math.abs(height*Math.cos(a))<=size.height+1e-8);
     }
   }
 });

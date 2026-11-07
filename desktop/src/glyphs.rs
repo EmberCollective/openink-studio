@@ -14,6 +14,10 @@ pub struct GlyphFont {
     pub version: u32,
     pub name: String,
     pub glyphs: BTreeMap<String, Glyph>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variants: BTreeMap<String, Vec<Glyph>>,
+    #[serde(skip)]
+    pub baseline_ratio: Option<f64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Glyph {
@@ -27,6 +31,16 @@ pub struct GlyphFontSummary {
     pub name: String,
     pub path: String,
     pub characters: Vec<String>,
+}
+impl GlyphFont {
+    pub(crate) fn choose(&self, ch: char, random: &mut crate::inkfont::Random) -> Option<&Glyph> {
+        let key = ch.to_string();
+        if let Some(variants) = self.variants.get(&key).filter(|v| !v.is_empty()) {
+            Some(&variants[random.index(variants.len())])
+        } else {
+            self.glyphs.get(&key)
+        }
+    }
 }
 
 fn directory() -> Result<PathBuf, String> {
@@ -55,7 +69,7 @@ fn safe_name(name: &str) -> Result<String, String> {
             .collect::<String>()
     ))
 }
-fn validate_glyph(g: &Glyph) -> Result<(), String> {
+pub(crate) fn validate_glyph(g: &Glyph) -> Result<(), String> {
     if [g.width_mm, g.height_mm, g.advance_mm]
         .iter()
         .any(|v| !v.is_finite() || *v < 0.)
@@ -86,6 +100,9 @@ fn validate_glyph(g: &Glyph) -> Result<(), String> {
     Ok(())
 }
 pub(crate) fn load(path: &Path) -> Result<GlyphFont, String> {
+    if path.extension().and_then(|s| s.to_str()) == Some("inkfont") {
+        return crate::inkfont::load_font(path);
+    }
     let meta = fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > 100_000_000 {
         return Err("Glyph library exceeds 100 MB".into());
@@ -94,6 +111,9 @@ pub(crate) fn load(path: &Path) -> Result<GlyphFont, String> {
         .map_err(|e| format!("Glyph library JSON: {e}"))?;
     if font.format != "openink-stroke-font" || font.version != 1 {
         return Err("Unsupported stroke font format/version".into());
+    }
+    if !font.variants.is_empty() {
+        return Err("Multiple glyph variants require .inkfont format".into());
     }
     let mut points = 0;
     for (ch, g) in &font.glyphs {
@@ -109,7 +129,9 @@ pub(crate) fn load(path: &Path) -> Result<GlyphFont, String> {
     Ok(font)
 }
 pub fn list_fonts() -> Result<Vec<GlyphFontSummary>, String> {
-    list_at(&directory()?)
+    let mut fonts = list_at(&directory()?)?;
+    fonts.extend(crate::inkfont::inkfont_list()?.into_iter().map(|f| GlyphFontSummary { name:f.name, path:f.path, characters:f.characters }));
+    Ok(fonts)
 }
 fn list_at(dir: &Path) -> Result<Vec<GlyphFontSummary>, String> {
     if !dir.exists() {
@@ -254,6 +276,8 @@ fn save_at(
             version: 1,
             name,
             glyphs: BTreeMap::new(),
+            variants: BTreeMap::new(),
+            baseline_ratio: None,
         }
     };
     if font.glyphs.contains_key(&character) {
@@ -321,6 +345,7 @@ pub fn compose_jittered(
         return Err("Configured rows are too close for the chosen glyph size".into());
     }
     let font = load(path)?;
+    let mut random = crate::inkfont::Random::new();
     let mut strokes = vec![];
     let mut x = 0.;
     let mut row = 0usize;
@@ -346,7 +371,7 @@ pub fn compose_jittered(
             if ch.is_whitespace() {
                 None
             } else {
-                Some(font.glyphs.get(&ch.to_string()).ok_or_else(|| {
+                Some(font.choose(ch, &mut random).ok_or_else(|| {
                     format!("Stroke font lacks character {ch} (U+{:04X})", ch as u32)
                 })?)
             };

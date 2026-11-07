@@ -1,6 +1,9 @@
+import { InkFontManager } from "./InkFontManager";
+import { InkFontImport } from "./InkFontImport";
 import { BatchPanel, BatchAssignment } from "./BatchPanel";
 import { batchesOf, batchOf, batchDocument, batchStatus, batchColors, assignBatch, cleanBatchData, replaceBatchRoute, copyBatchPage, uniquePageStrokeIds, type Batch, type BatchData } from "./batchModel";
-import { rotatedViewSize } from "./pointerGeometry";
+import { referenceViewSize, rotatedViewSize } from "./pointerGeometry";
+import { MachineReference } from "./MachineReference";
 import { FontRulesPanel } from "./FontRulesPanel";
 import { legacyFontRule, scalarSelection, validRuleLibrary, type FontRuleLibrary, type FontRule } from "./fontRules";
 import { useProjectFiles } from "./useProjectFiles";
@@ -391,12 +394,7 @@ export default function App() {
     [legacyChoices, setLegacyChoices] = useState<string[]>([]);
   const [glyphFonts, setGlyphFonts] = useState<GlyphFont[]>([]);
   const [glyphFont, setGlyphFont] = useState("");
-  const [libraryName, setLibraryName] = useState("我的手写字库");
-  const [glyphCharacter, setGlyphCharacter] = useState("");
-  const [cropWindow, setCropWindow] = useState<
-    [number, number, number, number]
-  >([0, 0, 20, 20]);
-  const [showExtraction, setShowExtraction] = useState(false);
+  const [inkFontOpen, setInkFontOpen] = useState(false);
   const [customFit, setCustomFit] = useState(false);
   const [comparisonVariants, setComparisonVariants] = useState<
       ComparisonVariant[]
@@ -434,6 +432,12 @@ export default function App() {
   const paperWizardRef = useRef(paperWizard); paperWizardRef.current = paperWizard;
   const [textJitter, setTextJitter] = useState<NonNullable<TextSettings["jitter"]>>({ x_mm: 0, y_mm: 0, rotation_deg: 0, scale_x_percent: 0, scale_y_percent: 0, scale_percent: 0 });
   const [textPlacement, setTextPlacement] = useState<"free" | "lines">("free");
+  const [lineGap, setLineGap] = useState<number | null>(null);
+  const [paragraphIndent, setParagraphIndent] = useState(false), [indentChars, setIndentChars] = useState(2);
+  const [textAlignment, setTextAlignment] = useState<NonNullable<TextSettings["alignment"]>>("left");
+  const effectiveLineGap = lineGap ?? Math.max(0, (template.height_mm - 2 * template.margin_mm) / template.lines - template.font_size_mm);
+  const customTextLayout = lineGap !== null || paragraphIndent || textAlignment !== "left";
+  const paragraph = { indent_mm: paragraphIndent ? indentChars * (template.font_size_mm + template.letter_spacing_mm) : 0, alignment: textAlignment };
   const [lineStart, setLineStart] = useState(0), [lineOffset, setLineOffset] = useState(0.5);
   const background = paperPreview || backgroundPages[canvasPage];
   const canvasPageCount = Math.max(1, canvasPage + 1, backgroundPages.length, ...[...pageDocuments.current.keys()].map(i => i + 1));
@@ -444,10 +448,15 @@ export default function App() {
   function captureTextSettings(): TextSettings {
     return { text, font_mode: fontMode, font_path: font, glyph_path: glyphFont, legacy_selection: legacySelection,
       legacy_percent: legacyPercent, legacy_baseline: legacyBaseline, legacy_seed: legacySeed, centerline, jitter: textJitter, font_rules: fontRules,
-      placement: textPlacement, start_line: lineStart, offset: lineOffset, font_size_mm: template.font_size_mm, letter_spacing_mm: template.letter_spacing_mm };
+      placement: textPlacement, start_line: lineStart, offset: lineOffset, font_size_mm: template.font_size_mm, letter_spacing_mm: template.letter_spacing_mm,
+      ...(lineGap !== null ? { line_gap_mm: lineGap } : {}), paragraph_indent: paragraphIndent, indent_chars: indentChars, alignment: textAlignment };
   }
   function restoreTextSettings(doc: Document, replaceRules = false) {
     const value = doc.text_settings;
+    setLineGap(validTextSettings(value) ? value.line_gap_mm ?? null : null);
+    setParagraphIndent(validTextSettings(value) ? value.paragraph_indent ?? false : false);
+    setIndentChars(validTextSettings(value) ? value.indent_chars ?? 2 : 2);
+    setTextAlignment(validTextSettings(value) ? value.alignment ?? "left" : "left");
     setRuleScope("all"); setTextSelection(null);
     if (validTextSettings(value) && validRuleLibrary(value.font_rules)) {
       const saved = value.font_rules;
@@ -470,7 +479,6 @@ export default function App() {
     setTextPlacement(value.placement); setLineStart(value.start_line); setLineOffset(value.offset);
 
   }
-  const [extractionDocument, setExtractionDocument] = useState<Document | null>(null);
   const [activeJobDocument, setActiveJobDocument] = useState<Document | null>(
     null,
   );
@@ -592,11 +600,13 @@ export default function App() {
   const editPolicyRef = useRef(mutationPolicy);
   editPolicyRef.current = mutationPolicy;
   function editingBlocked() {
-    return jobLockRef.current || !!paperWizard || !editPolicyRef.current.canEditDocument;
+    return jobLockRef.current || !!paperWizard || inkFontOpen || !editPolicyRef.current.canEditDocument;
   }
   const machineBusy = jobLocked || running || positioning || recovering;
   const connectionAttempt = useRef(false);
   const [viewRotation, setViewRotation] = useState(0);
+  const [referenceFollowsCanvas, setReferenceFollowsCanvas] = useState(false);
+  const [showMachineReference, setShowMachineReference] = useState(true);
   const [showGuideNumbers, setShowGuideNumbers] = useState(true);
   const [zoom, setZoom] = useState(1),
     [rotation, setRotation] = useState(0),
@@ -627,8 +637,8 @@ export default function App() {
   const [penDraft, setPenDraft] = useState<number[] | null>(null);
   const pan = useCanvasPan(canvasTool === "pan");
   useEffect(() => {
-    if (machineBusy || busy || registrationLocked || paperWizard || showExtraction) setPlacingOrigin(false);
-  }, [machineBusy, busy, registrationLocked, paperWizard, showExtraction]);
+    if (machineBusy || busy || registrationLocked || paperWizard || inkFontOpen) setPlacingOrigin(false);
+  }, [machineBusy, busy, registrationLocked, paperWizard, inkFontOpen]);
   useEffect(() => {
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setPlacingOrigin(false); };
     window.addEventListener("keydown", escape);
@@ -781,7 +791,7 @@ export default function App() {
   const wcoKnown =
     status.wco?.length === 3 && status.wco.every((v) => Number.isFinite(v));
   const canJog = !!connected && !machineBusy && status.state === "Idle";
-  useJogKeys(rightOpen && rightTab === "machine" && canJog && !busy, jogStep, travelFeed, command);
+  useJogKeys(rightOpen && rightTab === "machine" && canJog && !busy && !inkFontOpen, jogStep, travelFeed, command);
   const canPen =
     canJog &&
     positionKnown &&
@@ -878,12 +888,7 @@ export default function App() {
     }
     editor.commitAll({ ...next, batches }, editor.selection);
   }
-  const extractionPrepared = useMemo(() => {
-    if (!extractionDocument) return null;
-    const box = boundsOf(extractionDocument);
-    return box ? movePaths(extractionDocument, extractionDocument.strokes.map((_, i) => i), template.margin_mm - box.x, template.margin_mm - box.y) : extractionDocument;
-  }, [extractionDocument, template.margin_mm]);
-  const displayDoc = showExtraction ? extractionPrepared : preparedDoc;
+  const displayDoc = preparedDoc;
   function commitCanvas(next: Document) {
     if (editingBlocked()) return;
     next = ensureStrokeIds(next);
@@ -903,8 +908,8 @@ export default function App() {
   const editor = useCanvasEditing({
     document: displayDoc,
     sourceKey: `composition-${projectRevision}-${canvasPage}`,
-    locked: !editPolicy.canEditDocument || !!paperWizard,
-    extracting: showExtraction,
+    locked: !editPolicy.canEditDocument || !!paperWizard || inkFontOpen,
+    extracting: false,
     writtenIds,
     pasteBatch: currentBatch.id,
     snapGuides: background?.guides_visible !== false ? background?.guide_lines : [],
@@ -1062,7 +1067,7 @@ export default function App() {
         ? `等待设备空闲：${status.state}`
         : !positionKnown
           ? "等待控制器反馈当前笔尖位置"
-          : showExtraction
+          : inkFontOpen
                   ? "请先关闭字形提取，返回编辑作品"
                   : !pendingDoc?.strokes.some((s) => s.length > 1)
                     ? preparedDoc?.strokes.some((s) => s.length > 1) ? "当前批次没有待写内容；在线路中选择其他批次，或明确重置书写标记" : "请先导入或生成书写路径"
@@ -1074,50 +1079,13 @@ export default function App() {
                             ? `超出当前软件范围（X 210 / Y 297 mm）。画布允许区域：${fitArea ? `X ${fitArea.x.toFixed(1)}–${(fitArea.x + fitArea.width).toFixed(1)}，Y ${fitArea.y.toFixed(1)}–${(fitArea.y + fitArea.height).toFixed(1)} mm` : "与纸面无交集"}；请检查原点与笔尖定位`
                             : "";
   const canRun = !runReason && !busy && !machineBusy && !registrationLocked && !paperWizard;
-  const cropPolygon = useMemo(() => {
-    const document = extractionDocument;
-    if (!document || !showExtraction || !source) return "";
-    const a = 0, scale = 1;
-    const transform = (x: number, y: number) => ({
-      x: (x * Math.cos(a) - y * Math.sin(a)) * scale,
-      y: (x * Math.sin(a) + y * Math.cos(a)) * scale,
-    });
-    let minx = Infinity,
-      miny = Infinity;
-    for (const s of document.strokes)
-      for (const p of s) {
-        const q = transform(p.x, p.y);
-        minx = Math.min(minx, q.x);
-        miny = Math.min(miny, q.y);
-      }
-    const [x0, y0, x1, y1] = cropWindow;
-    return [
-      [x0, y0],
-      [x1, y0],
-      [x1, y1],
-      [x0, y1],
-    ]
-      .map(([x, y]) => {
-        const q = transform(x, y);
-        return `${q.x - minx + template.margin_mm},${q.y - miny + template.margin_mm}`;
-      })
-      .join(" ");
-  }, [
-    extractionDocument,
-    showExtraction,
-    source,
-    rotation,
-    scale,
-    cropWindow,
-    template.margin_mm,
-  ]);
   function fitToPage() {
     if (
       !document ||
       !preparedDoc?.strokes.some((s) => s.length > 1) ||
       machineBusy ||
       busy ||
-      showExtraction
+      inkFontOpen
     )
       return;
     if (!fitArea) {
@@ -1153,7 +1121,7 @@ export default function App() {
     route.recompute();
   }
   function changeRotation(value: number) {
-    if (machineBusy || busy || showExtraction) return;
+    if (machineBusy || busy || inkFontOpen) return;
     if (editedDocument) {
       editor.commitAll(
         rotatePaths(
@@ -1166,7 +1134,7 @@ export default function App() {
     } else setRotation(value);
   }
   function changeScale(value: number) {
-    if (machineBusy || busy || showExtraction) return;
+    if (machineBusy || busy || inkFontOpen) return;
     if (editedDocument) {
       const b = boundsOf(editedDocument);
       if (!b) return;
@@ -1447,12 +1415,19 @@ export default function App() {
   }, []);
   function fitPaper() {
     const el = paperHost.current;
-    if (!el || el.clientWidth <= 104 || el.clientHeight <= 62) return;
+    const scroll = el?.querySelector<HTMLElement>(".paper-scroll");
+    if (!scroll || scroll.clientWidth <= 0 || scroll.clientHeight <= 0) return;
+    const padding = window.getComputedStyle(scroll);
+    const width = scroll.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
+    const height = scroll.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom);
+    if (width <= 0 || height <= 0) return;
     const size = rotatedViewSize(template.width_mm, template.height_mm, viewRotation);
-    setPaperFit(Math.min((el.clientWidth - 104) / size.width, (el.clientHeight - 62) / size.height));
+    setPaperFit(Math.min((width - 24) / size.width, (height - 24) / size.height));
     setZoom(1);
-    const scroll = el.querySelector<HTMLElement>(".paper-scroll");
-    if (scroll) { scroll.scrollLeft = 0; scroll.scrollTop = 0; }
+    requestAnimationFrame(() => {
+      scroll.scrollLeft = (scroll.scrollWidth - scroll.clientWidth) / 2;
+      scroll.scrollTop = (scroll.scrollHeight - scroll.clientHeight) / 2;
+    });
   }
   useEffect(() => {
     const el = paperHost.current;
@@ -1478,17 +1453,18 @@ export default function App() {
       }
     });
   }
-  async function composeRuleText(rule: FontRule, selection: [number, number] | null, seed = crypto.getRandomValues(new Uint32Array(1))[0], sample?: { font_mode: typeof fontMode; path: string; selections: FontSelection[]; text: string }) {
+  async function composeText(rule: FontRule | undefined, selection: [number, number] | null, seed = crypto.getRandomValues(new Uint32Array(1))[0], sample?: { font_mode: typeof fontMode; path: string; selections: FontSelection[]; text: string }) {
     const source = sample || { font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text };
     if (!source.text.trim()) throw new Error("请输入文字内容后预览");
     if (source.font_mode === "legacy" ? !source.selections.length : !source.path) throw new Error("请先选择字体");
         if (textPlacement === "lines" && (!background?.processed || !background.guide_lines?.length)) throw new Error("请先确认纸张背景横线");
         const margin = template.margin_mm;
-        const pitch = (template.height_mm - 2 * margin) / template.lines;
+        const pitch = template.font_size_mm + effectiveLineGap;
         if (textPlacement === "free" && pitch < template.font_size_mm) throw new Error("行高小于字号，请减少行数或字号");
-        const guides = textPlacement === "lines" ? background!.guide_lines! : Array.from({ length: template.lines }, (_, i) => ({ id: `text-${i}`, start: [margin, margin + template.font_size_mm + i * pitch] as [number, number], end: [template.width_mm - margin, margin + template.font_size_mm + i * pitch] as [number, number] }));
+        const rows = lineGap === null ? template.lines : Math.max(0, Math.floor((template.height_mm - 2 * margin - template.font_size_mm) / pitch) + 1);
+        const guides = textPlacement === "lines" ? background!.guide_lines! : Array.from({ length: rows }, (_, i) => ({ id: `text-${i}`, start: [margin, margin + template.font_size_mm + i * pitch] as [number, number], end: [template.width_mm - margin, margin + template.font_size_mm + i * pitch] as [number, number] }));
         const d = await call<Document>("lined_text_document", {
-          jitter: { seed }, rules: { rule, selection }, ...source,
+          jitter: { seed }, rules: rule ? { rule, selection } : null, paragraph, ...source,
           size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm,
           guide_lines: guides, start_line: textPlacement === "lines" ? lineStart : 0, baseline_offset_mm: textPlacement === "lines" ? lineOffset : 0,
           legacy_baseline: legacyBaseline, legacy_percent: legacyPercent, legacy_seed: legacySeed,
@@ -1500,7 +1476,7 @@ export default function App() {
     if (editingBlocked()) return;
     await work("生成文字路径", async () => {
       if (fontMode === "legacy" && !privateGfont)
-        throw new Error("此版本不支持原版 gfont 字体，请选择普通字体或本地中心线字库；已有画布笔迹仍可使用");
+        throw new Error("此版本不支持原版 gfont 字体，请选择普通字体或OpenInk 字库；已有画布笔迹仍可使用");
       if (fontMode === "regular" && !font)
         throw new Error("请先选择 TTF / OTF 字体");
       if (fontMode === "glyph" && !glyphFont)
@@ -1510,23 +1486,23 @@ export default function App() {
       const rule = fontRules.rules.find(r => r.id === fontRules.selected);
       const selection = ruleScope === "selection" ? textSelection?.range : null;
       if (rule && ruleScope === "selection" && (!selection || textSelection?.text !== text)) throw new Error("文字选区已失效，请重新框选输入文字；未插入文字");
-      if (rule) {
-        const { document: d } = await composeRuleText(rule, selection || null);
-        setDocument(d, fontMode, textPlacement === "lines"); setShowExtraction(false); setScale(1); setRotation(0);
+      if (rule || customTextLayout) {
+        const { document: d } = await composeText(rule, selection || null);
+        setDocument(d, fontMode, textPlacement === "lines" || customTextLayout);  setScale(1); setRotation(0);
         if (fontMode === "legacy") setAllowReverse(false);
-        notify(`已应用规则“${rule.name}” · 随机结果已冻结`); return;
+        notify(rule ? `已应用规则“${rule.name}” · 随机结果已冻结` : `已按段落设置生成文字 · ${d.strokes.length} 条路径`); return;
       }
       if (textPlacement === "lines") {
         if (!background?.processed || !background.guide_lines?.length) throw new Error("请先完成纸张背景设置并确认横线");
         if (fontMode === "legacy" && !legacySelection.length) throw new Error("请先选择原版 gfont 字体");
         const d = await call<Document>("lined_text_document", {
-          jitter, font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text,
+          jitter, paragraph, font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text,
           size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm,
           guide_lines: background.guide_lines, start_line: lineStart, baseline_offset_mm: lineOffset,
           legacy_baseline: legacyBaseline, legacy_percent: legacyPercent, legacy_seed: legacySeed,
           centerline, options, width_mm: template.width_mm, height_mm: template.height_mm,
         });
-        setDocument(d, fontMode, true); setShowExtraction(false); setScale(1); setRotation(0);
+        setDocument(d, fontMode, true);  setScale(1); setRotation(0);
         notify(`已沿背景横线生成文字 · ${d.strokes.length} 条路径`);
         return;
       }
@@ -1560,7 +1536,7 @@ export default function App() {
           );
         setDocument(result.document, "legacy");
         setAllowReverse(false);
-        setShowExtraction(false);
+
         setScale(1);
         setRotation(0);
         notify(
@@ -1584,7 +1560,7 @@ export default function App() {
         },
       );
       setDocument(d, fontMode);
-      setShowExtraction(false);
+
       setScale(1);
       setRotation(0);
       notify(`已生成文字路径 · ${d.strokes.length} 条路径`);
@@ -1670,12 +1646,11 @@ export default function App() {
     await work("转换文档路径", async () => {
       if (!path) throw new Error("请先选择文件");
       setDocument(null);
-      setShowExtraction(false);
+
       const d = await call<Document>("import_document", {
         path,
         options: { ...options, page },
       });
-      setExtractionDocument(d);
       setDocument(
         /\.pdf$/i.test(path)
           ? {
@@ -1685,32 +1660,9 @@ export default function App() {
           : d,
       );
       setAllowReverse(!preparedDoc?.materials?.some((m) => m.kind === "legacy"));
-      setCropWindow([0, 0, d.width_mm, d.height_mm]);
       setScale(1);
       setRotation(0);
       notify(`已转换 ${fileName(path)} · ${d.strokes.length} 条路径`);
-    });
-  }
-  async function saveGlyph() {
-    if (editingBlocked()) return;
-    await work("保存字形到本地字库", async () => {
-      if (!extractionDocument) throw new Error("请先转换 PDF 或图片");
-      if (Array.from(glyphCharacter.trim()).length !== 1)
-        throw new Error("请绑定一个字符，不自动识别文字");
-      if (!libraryName.trim()) throw new Error("请填写字库名");
-      if (cropWindow[2] <= cropWindow[0] || cropWindow[3] <= cropWindow[1])
-        throw new Error("选区右下角必须大于左上角");
-      const result = await call<GlyphFont>("save_glyph", {
-        library_name: libraryName.trim(),
-        character: glyphCharacter.trim(),
-        document: extractionDocument,
-        window: cropWindow,
-      });
-      setGlyphFonts(await call<GlyphFont[]>("list_glyph_fonts"));
-      setGlyphFont(result.path);
-      notify(
-        `已将“${glyphCharacter.trim()}”保存到 ${result.name} · 共 ${result.characters.length} 个字符`,
-      );
     });
   }
   const [clipboardFiles, setClipboardFiles] = useState<ClipboardFile[]>([]);
@@ -1780,7 +1732,7 @@ export default function App() {
     paperPreviousSetup.current = registrationSetup ? structuredClone(registrationSetup) : null;
     setPaperDraftSize({ width_mm: template.width_mm, height_mm: template.height_mm });
     setPaperWizard({ kind, newPage }); setPaperPreview(null); setPaperCalibrated(false); setPaperCalibrationStarted(false);
-    setLeftOpen(true); setLeftTab("board"); setShowExtraction(false);
+    setLeftOpen(true); setLeftTab("board");
   }
   async function importPdfBackground(newPage: boolean) {
     if (choosingFile.current || editingBlocked() || busy) return;
@@ -1911,7 +1863,7 @@ export default function App() {
     setSelectedBatch(batchesOf(next).find(b => batchStatus(next, b.id, writtenIds) === "待书写")?.id || batchesOf(next)[0].id);
     setCanvasPage(index); setSourceDocument(next); setEditedDocument(next);
     setTemplate(layoutTemplate(layout)); setSelectedTemplateId("");
-    setRotation(0); setScale(1); setShowExtraction(false); setRouteInspection(null); restoreTextSettings(next);
+    setRotation(0); setScale(1);  setRouteInspection(null); restoreTextSettings(next);
   }
   async function switchCanvasPage(index: number) {
     if (editingBlocked() || busy || index === canvasPage || index < 0 || index >= canvasPageCount) return;
@@ -2076,7 +2028,7 @@ export default function App() {
   projectSnapshotRef.current = projectSnapshot;
   const files = useProjectFiles({ snapshot: projectSnapshot, path: projectPath, onPath: setProjectPath,
     blocked: editingBlocked() || !!busy, desktop,
-    closeBlocked: machineBusy || !!busy || registrationLocked,
+    closeBlocked: machineBusy || !!busy || registrationLocked || inkFontOpen,
     closeWarning: paperWizard ? "图片背景设置尚未完成，未应用的背景和调整不会保存。选择取消可返回继续设置；保存并继续只保存已应用的工程内容。" : "",
     onSave: async (path, project) => { await call("save_project", { path, project }); },
     onOpen: restoreProject, onNew: resetProject, onMessage: notify });
@@ -2096,7 +2048,7 @@ export default function App() {
     setRestoreSetup({ version: Date.now(), value: { points: [[210, 0], [15, 282]], show_points: true, selected_profile: "" } });
     setRegistrationLocked(false); setRegistrationPointEdit(null);
     setProjectRevision(v => v + 1); setRotation(0); setScale(1); setSource(""); setPageCount(null);
-    setExtractionDocument(null); setShowExtraction(false); setClipboardFiles([]);
+      setClipboardFiles([]);
     setPaperWizard(null); setPaperPreview(null); setPaperCalibrated(false); setPaperCalibrationStarted(false);
     setText(""); setTextPlacement("free"); setLineStart(0); setLineOffset(0.5);
     setSelectedBatch("default"); setBatchReview(new Set()); submittedBatch.current = null;
@@ -2148,7 +2100,7 @@ export default function App() {
       setRegistrationLocked(false); setRegistrationPointEdit(null);
       setRestoreSetup({ version: Date.now(), value: { points: calibration.points, show_points: calibration.show_points, selected_profile: candidate ? candidate.id : calibration.selected_profile } });
       setProjectRevision(v => v + 1); setProjectPath(selected);
-      setRotation(0); setScale(1); setSource(""); setPageCount(null); setExtractionDocument(null); setShowExtraction(false); setClipboardFiles([]);
+      setRotation(0); setScale(1); setSource(""); setPageCount(null);   setClipboardFiles([]);
       setWrittenIds(new Set(value.pages.flatMap(p => p.document.writtenStrokeIds || [])));
       setBatchReview(new Set(value.pages.flatMap((p, i) => (p.document.reviewBatchIds || []).map(id => `${i}:${id}`))));
       setSelectedBatch(batchesOf(next)[0].id); submittedBatch.current = null;
@@ -2207,7 +2159,7 @@ export default function App() {
   const pathCount = document?.strokes.length || 0;
   const paperWidth = template.width_mm * Math.max(0.2, paperFit) * zoom,
     paperHeight = template.height_mm * Math.max(0.2, paperFit) * zoom;
-  const viewSize = rotatedViewSize(paperWidth, paperHeight, viewRotation);
+  const viewSize = referenceViewSize(paperWidth, paperHeight, viewRotation, referenceFollowsCanvas);
   return (
     <DocumentEditLock.Provider value={!editPolicy.canEditDocument}>
     <div className="studio">
@@ -2278,6 +2230,12 @@ export default function App() {
               <fieldset className="panel-fieldset" disabled={machineBusy}>
                 <div className="panel-scroll">
                   <div className="workspace-tab-content" hidden={leftTab !== "board"}>
+                  <Section icon={<Crosshair size={17} />} title="坐标与机器参考">
+                    <Toggle checked={referenceFollowsCanvas} onChange={setReferenceFollowsCanvas} label="坐标系跟随画布旋转" disabled={machineBusy || !!paperWizard} />
+                    <Toggle checked={showMachineReference} onChange={setShowMachineReference} label="显示机器虚影" disabled={machineBusy || !!paperWizard} />
+                    <p className="field-note">{referenceFollowsCanvas ? "参考方向与纸张一起旋转。" : "参考方向固定，纸张独立旋转。"}</p>
+                    <details className="reference-details"><summary>关于方向参考</summary><p className="field-note">虚影仅辅助辨认机器方向，不表示实际尺寸、位置或可书写范围。</p></details>
+                  </Section>
                   {paperWizard ? <PaperBackgroundWizard key={`${paperWizard.kind}-${paperWizard.newPage}`} kind={paperWizard.kind} width={paperDraftSize?.width_mm || template.width_mm} height={paperDraftSize?.height_mm || template.height_mm} python={options.python_path} locked={machineBusy || !!busy} calibrated={paperCalibrated} canvasHost={paperCornerHost} onStageChange={setPaperStage} onGuideEditor={setPaperGuideEditor} onPreview={setPaperPreview} onCalibration={beginPaperCalibration} onApply={applyPaperBackground} onCancel={() => void cancelPaperBackground()} onSizeChange={(width_mm, height_mm) => setPaperDraftSize({ width_mm, height_mm })} /> : <Section icon={<Layers3 size={17} />} title="纸张背景">
                     <button className="button" disabled={!editPolicy.canEditDocument} onClick={() => importBackground("pdf")}>导入 PDF 作为背景</button>
                     <button className="button" disabled={!editPolicy.canEditDocument} onClick={() => importBackground("image")}>导入照片作为背景</button>
@@ -2387,7 +2345,7 @@ export default function App() {
                     </button>
                   </Section></fieldset>
                 <Section icon={<MousePointer2 size={17} />} title="纸面定位">
-                  <RegistrationPanel secondPointVersion={secondPointVersion} onPositioningStarted={() => { setRightOpen(true); setRightTab("machine"); }} onComplete={() => void completeCalibration()} restoreSetup={restoreSetup} onSetupChange={setRegistrationSetup} travelFeed={travelFeed} pointEdit={registrationPointEdit} editLocked={machineBusy || !!busy || showExtraction} onPointsChange={setRegistrationPoints} errorVersion={registrationErrorVersion} width={template.width_mm} height={template.height_mm} origin={confirmedOrigin} registration={paperWizard || confirmedOrigin ? registration : scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1)} ready={canJog && !busy} positioning={positioning} calibrationVersion={calibrationVersion} sessionVersion={sessionVersion} preserveScale={!paperWizard && currentLayout.scale_x !== undefined} onLock={setRegistrationLocked} onCommand={async request => { if (!canJog || busy) return false; if (request.type !== "cancel_registration") setPositioning(true); const ok = await command(request); if (!ok) setPositioning(false); return ok; }} />
+                  <RegistrationPanel secondPointVersion={secondPointVersion} onPositioningStarted={() => { setRightOpen(true); setRightTab("machine"); }} onComplete={() => void completeCalibration()} restoreSetup={restoreSetup} onSetupChange={setRegistrationSetup} travelFeed={travelFeed} pointEdit={registrationPointEdit} editLocked={machineBusy || !!busy || inkFontOpen} onPointsChange={setRegistrationPoints} errorVersion={registrationErrorVersion} width={template.width_mm} height={template.height_mm} origin={confirmedOrigin} registration={paperWizard || confirmedOrigin ? registration : scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1)} ready={canJog && !busy} positioning={positioning} calibrationVersion={calibrationVersion} sessionVersion={sessionVersion} preserveScale={!paperWizard && currentLayout.scale_x !== undefined} onLock={setRegistrationLocked} onCommand={async request => { if (!canJog || busy) return false; if (request.type !== "cancel_registration") setPositioning(true); const ok = await command(request); if (!ok) setPositioning(false); return ok; }} />
                   <button className="button full" onClick={() => { setRightOpen(true); setRightTab("machine"); }}>点动微调笔尖 <ChevronRight size={14} /></button>
                   <div className="field-note" aria-label="当前页坐标系">当前页坐标系：{currentLayout.name} · {sharedPages.length} 页共用 · {currentLayout.width_mm.toFixed(1)} × {currentLayout.height_mm.toFixed(1)} mm</div>
                   <p className="field-note">换纸后，将笔尖对准本页相同的工作原点，点击“将当前位置设为工作原点”即可继续。重连后须重新校准。</p>
@@ -2440,7 +2398,7 @@ export default function App() {
                             <option value="regular">
                               普通字体 · TTF / OTF
                             </option>
-                            <option value="glyph">本地中心线字库</option>
+                            <option value="glyph">OpenInk 字库</option>
                             {privateGfont && <option value="legacy">原版 gfont 字体</option>}
                             {!privateGfont && fontMode === "legacy" && <option value="legacy" disabled>原版字体（此版本不支持）</option>}
                           </select>
@@ -2479,7 +2437,7 @@ export default function App() {
                           </>
                         ) : fontMode === "glyph" ? (
                           <>
-                            <Field label="本地字库">
+                            <Field label="OpenInk 字库">
                               <div className="font-select-row">
                                 <select
                                   value={glyphFont}
@@ -2509,12 +2467,13 @@ export default function App() {
                                 </button>
                               </div>
                             </Field>
+                            <button className="button full" disabled={!!busy || machineBusy} onClick={() => setInkFontOpen(true)}><BookOpen size={15} />字包管理 · 识别入库</button>
                             <p className="glyph-characters">
                               已收录：
                               {glyphFonts
                                 .find((f) => f.path === glyphFont)
                                 ?.characters.join(" ") ||
-                                "尚无字形，请从 PDF / 图片手动绑定字符"}
+                                "尚无字形，打开字包管理以识别或手绘新增"}
                             </p>
                           </>
                         ) : null}
@@ -2598,7 +2557,7 @@ export default function App() {
                             placeholder="写下你想表达的文字…"
                           />
                         </Field>
-                        <div className="field-grid"><NumberField label="字号" value={template.font_size_mm} onChange={v => updateTemplate("font_size_mm", v)} min={1} max={80} /><NumberField label="字间距" value={template.letter_spacing_mm} onChange={v => updateTemplate("letter_spacing_mm", v)} min={0} max={20} step={0.5} /></div>
+                        <div className="field-grid"><NumberField label="字号" value={template.font_size_mm} onChange={v => updateTemplate("font_size_mm", v)} min={1} max={80} /><NumberField label="字间距" value={template.letter_spacing_mm} onChange={v => updateTemplate("letter_spacing_mm", v)} min={0} max={20} step={0.5} />{textPlacement === "free" && <NumberField label="行间距" value={Number(effectiveLineGap.toFixed(2))} onChange={setLineGap} min={0} max={100} step={0.5} />}</div>
                         <label className="paper-field">字体规则<select className="text-input" value={fontRules.selected} onChange={e => setFontRules(r => ({ ...r, selected: e.target.value }))}><option value="">无抖动</option>{fontRules.rules.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>
                         <button className="button full" onClick={() => setRulesOpen(true)}>设置字体规则</button>
                         {fontRules.selected && <><label className="paper-field">本次应用范围<select className="text-input" value={ruleScope} onChange={e => setRuleScope(e.target.value as "all" | "selection")}><option value="all">本次全部文字</option><option value="selection" disabled={!textSelection && ruleScope !== "selection"}>本次选中文字</option></select></label><p className="field-note">{ruleScope === "selection" ? (textSelection?.text === text ? `已选择 ${textSelection.range[1] - textSelection.range[0]} 个字符；仅应用字符设置，不应用整行波动与首字偏移。` : "选区已失效，请重新选中文字；不会自动改为全部。") : "仅作用于本次插入，已有画布内容不变。字体与规则独立选择。"}</p></>}
@@ -2609,9 +2568,12 @@ export default function App() {
                         ]} onSave={setFontRules} onPreview={(rule, seed, sample) => {
                           const mode = sample.font ? sample.font.slice(0, sample.font.indexOf(":")) as typeof fontMode : fontMode;
                           const path = sample.font ? sample.font.slice(sample.font.indexOf(":") + 1) : fontMode === "glyph" ? glyphFont : font;
-                          return composeRuleText(rule, null, seed, { font_mode: mode, path, selections: sample.font ? [{ path, weight: 1 }] : legacySelection, text: sample.text });
+                          return composeText(rule, null, seed, { font_mode: mode, path, selections: sample.font ? [{ path, weight: 1 }] : legacySelection, text: sample.text });
                         }} onClose={() => setRulesOpen(false)} />}
                         <div className="text-layout-options"><label className="paper-field">文字排版<select className="text-input" value={textPlacement} onChange={e => setTextPlacement(e.target.value as "free" | "lines")}><option value="free">自由排版</option><option value="lines">沿背景横线排版</option></select></label>
+                          <Toggle label="自动段落缩进" checked={paragraphIndent} onChange={setParagraphIndent} />
+                          {paragraphIndent && <label className="paper-field">首行缩进 / 字<DraftNumberInput className="text-input" type="number" value={indentChars} min={0} max={10} step={1} onChange={e => setIndentChars(Math.max(0, Math.min(10, Math.round(Number(e.target.value) || 0))))} /></label>}
+                          <label className="paper-field">对齐规则<select className="text-input" value={textAlignment} onChange={e => setTextAlignment(e.target.value as NonNullable<TextSettings["alignment"]>)}><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option><option value="justify">两端对齐</option></select></label>
                           {textPlacement === "lines" && (background?.processed && background.guide_lines?.length ? <div className="paper-fields"><label>起始横线<select className="text-input" value={lineStart} onChange={e => setLineStart(Number(e.target.value))}>{background.guide_lines.map((line, i) => <option key={line.id} value={i}>第 {guideLineNumber(line, i)} 行</option>)}</select></label><label>离横线 / mm<DraftNumberInput className="text-input" type="number" value={lineOffset} min={0} max={10} step={0.1} onChange={e => setLineOffset(Number(e.target.value))} /></label></div> : <><p className="field-note">当前页没有已确认的横线，请先设置纸张背景。</p><button className="button" onClick={() => importBackground("image")}>设置纸张背景</button></>)}
                         </div>
                         {fontMode === "regular" && (
@@ -2857,89 +2819,7 @@ export default function App() {
                         <p className="field-note">
                           阈值增大可保留浅墨，也可能引入噪声；线条更顺不代表没有漏笔。
                         </p>
-                        {extractionDocument && /\.(pdf|png|jpe?g)$/i.test(source) && (
-                          <details
-                            className="glyph-extraction"
-                            open={showExtraction}
-                            onToggle={(e) =>
-                              setShowExtraction(e.currentTarget.open)
-                            }
-                          >
-                            <summary>
-                              <BookOpen size={15} />
-                              提取到本地字库
-                              <ChevronDown size={13} />
-                            </summary>
-                            <p className="field-note">
-                              仅提取最近导入的文件（不含其他画布素材）。手动指定原文档单字区域并绑定字符；不执行 OCR。
-                            </p>
-                            <Field label="字库名">
-                              <input
-                                className="text-input"
-                                value={libraryName}
-                                onChange={(e) => setLibraryName(e.target.value)}
-                              />
-                            </Field>
-                            <Field label="绑定字符" hint="单个字符">
-                              <input
-                                className="text-input"
-                                placeholder="例如：永"
-                                value={glyphCharacter}
-                                onChange={(e) =>
-                                  setGlyphCharacter(e.target.value)
-                                }
-                              />
-                            </Field>
-                            <div className="field-grid">
-                              {(
-                                [
-                                  "左上 X",
-                                  "左上 Y",
-                                  "右下 X",
-                                  "右下 Y",
-                                ] as const
-                              ).map((label, i) => (
-                                <NumberField
-                                  key={label}
-                                  label={label}
-                                  value={cropWindow[i]}
-                                  onChange={(v) =>
-                                    setCropWindow(
-                                      (w) =>
-                                        w.map((n, k) => (k === i ? v : n)) as [
-                                          number,
-                                          number,
-                                          number,
-                                          number,
-                                        ],
-                                    )
-                                  }
-                                  min={0}
-                                  max={
-                                    i % 2 === 0
-                                      ? extractionDocument.width_mm
-                                      : extractionDocument.height_mm
-                                  }
-                                  step={0.5}
-                                />
-                              ))}
-                            </div>
-                            <p className="field-note">
-                              原文档坐标，单位 mm；页面{" "}
-                              {extractionDocument.width_mm.toFixed(1)} ×{" "}
-                              {extractionDocument.height_mm.toFixed(1)}
-                              。蓝色边框显示选区。
-                            </p>
-                            <button
-                              className="button full glyph-save"
-                              disabled={!!busy || !glyphCharacter.trim()}
-                              onClick={saveGlyph}
-                            >
-                              <Save size={15} />
-                              保存这个字形
-                            </button>
-                          </details>
-                        )}
+                        <button className="button full" disabled={!!busy || machineBusy} onClick={() => setInkFontOpen(true)}><BookOpen size={15} />识别手写并录入 OpenInk 字库</button>
                         <button
                           className="button primary full inline-submit"
                           disabled={!source || !!busy}
@@ -2995,7 +2875,7 @@ export default function App() {
                 <div className="canvas-edit-tools" role="group" aria-label="画布编辑工具">
                   <button className={`icon-button canvas-tool ${canvasTool === "select" && !placingOrigin ? "selected" : ""}`} aria-label="选择" aria-pressed={canvasTool === "select" && !placingOrigin} title="选择：选择或移动笔画" onClick={() => { setPlacingOrigin(false); setCanvasTool("select"); }}><MousePointer2 size={17} /></button>
                   <button className={`icon-button canvas-tool ${canvasTool === "pan" ? "selected" : ""}`} aria-label="拖动" aria-pressed={canvasTool === "pan"} title="拖动：拖动画布（也可按住空格）" onClick={() => { setPlacingOrigin(false); setCanvasTool("pan"); }}><Hand size={17} /></button>
-                  <button className={`icon-button canvas-tool ${placingOrigin ? "selected" : ""}`} aria-label="设置工作原点" aria-pressed={placingOrigin} disabled={!canJog || !!busy || registrationLocked || showExtraction || !!paperWizard || (!confirmedOrigin && (currentLayout.scale_x !== undefined))} title="设置工作原点：已定位时点目标位置；未定位时点笔尖当前位置。自动抬笔并立即设置，无需确认" onClick={() => { setCanvasTool("select"); setPlacingOrigin(value => !value); }}><Crosshair size={17} /></button>
+                  <button className={`icon-button canvas-tool ${placingOrigin ? "selected" : ""}`} aria-label="设置工作原点" aria-pressed={placingOrigin} disabled={!canJog || !!busy || registrationLocked || inkFontOpen || !!paperWizard || (!confirmedOrigin && (currentLayout.scale_x !== undefined))} title="设置工作原点：已定位时点目标位置；未定位时点笔尖当前位置。自动抬笔并立即设置，无需确认" onClick={() => { setCanvasTool("select"); setPlacingOrigin(value => !value); }}><Crosshair size={17} /></button>
                   <span className="tool-divider" />
                   {activeEditor.toolbar}
                 </div>
@@ -3005,7 +2885,7 @@ export default function App() {
                     aria-label="笔迹旋转角度" title="旋转实际书写笔迹"
                     type="number"
                     value={rotation}
-                    disabled={machineBusy || !!busy || showExtraction}
+                    disabled={machineBusy || !!busy || inkFontOpen}
                     onChange={(e) =>
                       changeRotation(Number(e.target.value) || 0)
                     }
@@ -3017,7 +2897,7 @@ export default function App() {
                     aria-label="路径缩放"
                     type="number"
                     value={scale}
-                    disabled={machineBusy || !!busy || showExtraction}
+                    disabled={machineBusy || !!busy || inkFontOpen}
                     min={0.01}
                     max={10}
                     step={0.05}
@@ -3036,7 +2916,7 @@ export default function App() {
                   <button
                     className="fit-button"
                     disabled={
-                      !document || machineBusy || !!busy || showExtraction
+                      !document || machineBusy || !!busy || inkFontOpen
                     }
                     onClick={fitToPage}
                     title="按墨迹范围适配页面内区与 A4 工作范围（X210 / Y297 mm）"
@@ -3056,7 +2936,7 @@ export default function App() {
                   <button
                     className="icon-button"
                     title="笔迹逆时针旋转（改变书写方向）"
-                    disabled={machineBusy || !!busy || showExtraction}
+                    disabled={machineBusy || !!busy || inkFontOpen}
                     onClick={() => changeRotation(rotation - 90)}
                   >
                     <RotateCcw size={16} />
@@ -3067,6 +2947,7 @@ export default function App() {
                 <div className="paper-corner-host" ref={setPaperCornerHost} hidden={!paperWizard || paperStage !== 1} />
                 <div hidden={!!paperWizard && paperStage === 1} className={`paper-scroll ${pan.panActive ? "pan-ready" : ""} ${pan.panning ? "panning" : ""}`} tabIndex={0} aria-label="画布视图区" {...pan.bind}>
                   <CanvasPointerOverlay width={template.width_mm} height={template.height_mm} paperWidth={viewSize.width} paperHeight={viewSize.height} origin={coordinateOrigin} registration={registration} host={paperHost.current} onPlaceOrigin={placingOrigin ? setWorkOrigin : undefined}>
+                  <MachineReference angle={viewRotation} follow={referenceFollowsCanvas} ghost={showMachineReference} paperWidth={paperWidth} paperHeight={paperHeight} />
                   <div
                     className="paper"
                     style={{ width: paperWidth, height: paperHeight, position: "absolute", left: (viewSize.width - paperWidth) / 2, top: (viewSize.height - paperHeight) / 2, transform: `rotate(${viewRotation}deg)` }}
@@ -3085,7 +2966,7 @@ export default function App() {
                         </clipPath>
                       </defs>
                       <g id="registration-preview-content" clipPath="url(#paper-clip)">
-                        {!showExtraction && backgroundVisible && background?.data_url && <image aria-label="PDF 背景（不可选中）" href={background.data_url} width={template.width_mm} height={template.height_mm} x={0} y={0} preserveAspectRatio="none" pointerEvents="none" />}
+                        {!inkFontOpen && backgroundVisible && background?.data_url && <image aria-label="PDF 背景（不可选中）" href={background.data_url} width={template.width_mm} height={template.height_mm} x={0} y={0} preserveAspectRatio="none" pointerEvents="none" />}
                         {showMargins && (
                           <g className="paper-guides">
                             <rect
@@ -3128,11 +3009,11 @@ export default function App() {
                         )}
                         {!paperWizard && editor.layer}
                         {paperGuideEditor && <g className="guide-edit-layer">{guideEditor.layer}</g>}
-                        {!showExtraction && background?.guides_visible !== false && visibleGuideLines?.map((line, index) => <g key={line.id} className="paper-guide" aria-label={`第 ${guideLineNumber(line, index)} 条横线`}>
+                        {!inkFontOpen && background?.guides_visible !== false && visibleGuideLines?.map((line, index) => <g key={line.id} className="paper-guide" aria-label={`第 ${guideLineNumber(line, index)} 条横线`}>
                           <line className="paper-guideline" x1={line.start[0]} y1={line.start[1]} x2={line.end[0]} y2={line.end[1]} />
                           {showGuideNumbers && <text className="paper-guideline-label" x={line.start[0] + 1} y={line.start[1] - 1} style={{ fontSize: 10 * template.width_mm / paperWidth }}>{guideLineNumber(line, index)}</text>}
                         </g>)}
-                        {!showExtraction && visibleRoute && <RouteOverlay snapshot={visibleRoute} selectedIndex={routeInspection?.index} />}
+                        {!inkFontOpen && visibleRoute && <RouteOverlay snapshot={visibleRoute} selectedIndex={routeInspection?.index} />}
                         <CanvasCoordinates
                           draftPen={penDraft}
                           first={visibleRoute?.document.strokes.find((s) => s.length > 1)?.[0] || coordinateFirst}
@@ -3144,18 +3025,10 @@ export default function App() {
                           pixelsPerMm={paperWidth / template.width_mm}
                           startLabel="路径起点（计划）"
                         />
-                        {cropPolygon && (
-                          <polygon
-                            points={cropPolygon}
-                            fill="#625bd712"
-                            stroke="#625bd7"
-                            strokeWidth={0.4}
-                            strokeDasharray="1 .7"
-                          />
-                        )}
+
                       </g>
                       {activeEditor.handles}
-                      {!showExtraction && paperStage !== 2 && leftOpen && leftTab === "board" && registrationPoints && <RegistrationHandles previewHost={paperHost.current} points={registrationPoints} width={template.width_mm} height={template.height_mm} pixelsPerMm={paperWidth / template.width_mm} disabled={!editPolicy.canEditDocument} onCommit={(index, point) => setRegistrationPointEdit({ index, point })} onMessage={notify} />}
+                      {!inkFontOpen && paperStage !== 2 && leftOpen && leftTab === "board" && registrationPoints && <RegistrationHandles previewHost={paperHost.current} points={registrationPoints} width={template.width_mm} height={template.height_mm} pixelsPerMm={paperWidth / template.width_mm} disabled={!editPolicy.canEditDocument} onCommit={(index, point) => setRegistrationPointEdit({ index, point })} onMessage={notify} />}
                     </svg>
                     {!document && (
                       <div className="paper-empty">
@@ -3170,7 +3043,6 @@ export default function App() {
                         </span>
                       </div>
                     )}
-                    <div className="paper-corner" />
                   </div>
                   </CanvasPointerOverlay>
                 </div>
@@ -3229,13 +3101,13 @@ export default function App() {
               </div>
               <div className="canvas-bottom">
                 {activeEditor.historyToolbar}
-                <div className="view-rotation" role="group" aria-label="视图旋转（不改变书写方向）">
-                  <span>视图</span>
-                  <button className="icon-button" title="视图逆时针旋转 90°" aria-label="视图逆时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value - 90) % 360)}><RotateCcw size={15} /></button>
-                  <DraftNumberInput aria-label="视图旋转角度" title="仅旋转视图，不改变书写方向" type="number" value={viewRotation} disabled={machineBusy || !!paperWizard} step={1} onChange={event => setViewRotation(Number(event.target.value) % 360)} />
+                <div className="view-rotation" role="group" aria-label="画布旋转（不改变书写方向）">
+                  <span>画布</span>
+                  <button className="icon-button" title="画布逆时针旋转 90°" aria-label="画布逆时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value - 90) % 360)}><RotateCcw size={15} /></button>
+                  <DraftNumberInput aria-label="画布旋转角度" title="仅旋转画布显示，不改变书写方向" type="number" value={viewRotation} disabled={machineBusy || !!paperWizard} step={1} onChange={event => setViewRotation(Number(event.target.value) % 360)} />
                   <span>°</span>
-                  <button className="icon-button" title="视图顺时针旋转 90°" aria-label="视图顺时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value + 90) % 360)}><RotateCw size={15} /></button>
-                  <button className="button small" disabled={viewRotation === 0 || machineBusy || !!paperWizard} onClick={() => setViewRotation(0)}>复位视图</button>
+                  <button className="icon-button" title="画布顺时针旋转 90°" aria-label="画布顺时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value + 90) % 360)}><RotateCw size={15} /></button>
+                  <button className="button small" disabled={viewRotation === 0 || machineBusy || !!paperWizard} onClick={() => setViewRotation(0)}>复位画布</button>
                 </div>
                 <div className="page-view-controls" role="group" aria-label="页面与视图">
               <PageNavigation page={canvasPage} count={canvasPageCount} width={template.width_mm} height={template.height_mm} disabled={!editPolicy.canEditDocument || !!paperWizard} onPage={switchCanvasPage} onAdd={addPage} />
@@ -3280,11 +3152,11 @@ export default function App() {
               </nav>
               <div className="panel-scroll" ref={rightScroll}>
                 <div className="workspace-tab-content section selection-properties" hidden={rightTab !== "properties"}>
-                  {!paperGuideEditor && preparedDoc && editor.selection.length > 0 && <BatchAssignment document={preparedDoc} selection={editor.selection} disabled={!editPolicy.canEditDocument || !!busy || showExtraction} onAssign={assignSelectionToBatch} />}
+                  {!paperGuideEditor && preparedDoc && editor.selection.length > 0 && <BatchAssignment document={preparedDoc} selection={editor.selection} disabled={!editPolicy.canEditDocument || !!busy || inkFontOpen} onAssign={assignSelectionToBatch} />}
                   {activeEditor.inspector || <div className="selection-empty"><strong>选区变换</strong><p className="field-note">在画布中选择路径后，可在这里编辑位置、尺寸和旋转。</p></div>}
                 </div>
                 <div className="workspace-tab-content" hidden={rightTab !== "planning"}>
-                {preparedDoc && <Section icon={<Layers size={17} />} title={`第 ${canvasPage + 1} 页 · 任务批次`}><BatchPanel document={preparedDoc} current={currentBatch.id} written={writtenIds} disabled={!editPolicy.canEditDocument || !!busy || showExtraction || !!paperWizard} selection={editor.selection} review={batchReview.has(reviewKey)} onSelect={setSelectedBatch} onAssign={assignSelectionToBatch} onChange={changeBatches} onReview={() => { if (editingBlocked()) return; setBatchReview(old => { const next = new Set(old); next.delete(reviewKey); return next; }); }} /></Section>}
+                {preparedDoc && <Section icon={<Layers size={17} />} title={`第 ${canvasPage + 1} 页 · 任务批次`}><BatchPanel document={preparedDoc} current={currentBatch.id} written={writtenIds} disabled={!editPolicy.canEditDocument || !!busy || inkFontOpen || !!paperWizard} selection={editor.selection} review={batchReview.has(reviewKey)} onSelect={setSelectedBatch} onAssign={assignSelectionToBatch} onChange={changeBatches} onReview={() => { if (editingBlocked()) return; setBatchReview(old => { const next = new Set(old); next.delete(reviewKey); return next; }); }} /></Section>}
                 {visibleRoute && routeInspection && <p className="field-note" role="status">第 {routeInspection.index} 笔 · {routeInspection.kind} · ({routeInspection.from.x.toFixed(2)}, {routeInspection.from.y.toFixed(2)}) → ({routeInspection.to.x.toFixed(2)}, {routeInspection.to.y.toFixed(2)}) · {routeInspection.distance.toFixed(2)} mm</p>}
                 <Section icon={<PenLine size={17} />} title="线路规划">
                       <button className="button" disabled={!!busy || !preparedDoc?.strokes.length} onClick={optimizeRoute}>重新计算走线</button>
@@ -3673,7 +3545,7 @@ export default function App() {
                         )}
                       {exceeds && document && (
                         <button
-                          disabled={!!busy || showExtraction}
+                          disabled={!!busy || inkFontOpen}
                           onClick={fitToPage}
                         >
                           适配画布
@@ -4392,6 +4264,12 @@ export default function App() {
           </div>
         )}
       </fieldset>
+      {inkFontOpen && <DocumentEditLock.Provider value={false}><InkFontManager
+        privateGfont={privateGfont}
+        onClose={() => setInkFontOpen(false)}
+        onChanged={() => { void call<GlyphFont[]>("list_glyph_fonts").then(setGlyphFonts).catch(e => notify(String(e))); }}
+        renderImport={(pack,onSaved,onCancel) => <InkFontImport pack={pack} onSaved={onSaved} onCancel={onCancel} options={options} />}
+      /></DocumentEditLock.Provider>}
       {recovering && (
         <div className="recovery-progress" role="status">
           <LoaderCircle className="spin" size={20} />

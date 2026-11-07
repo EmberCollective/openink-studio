@@ -1,0 +1,78 @@
+.modal.inkfont-dialog { width: min(1440px, 98vw); height: min(940px, 96vh); max-height: 96vh; padding: 0; overflow: hidden; }
+.inkfont-dialog::backdrop, .ink-confirm::backdrop { background: #252b4266; }
+.inkfont-dialog h2, .inkfont-dialog h3 { margin: 0; }
+.inkfont-dialog .field-note { margin: 7px 0; }
+.inkfont-dialog .section { min-width: 0; }
+.ink-manager, .ink-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.ink-header, .ink-package-heading, .ink-package-footer, .ink-status, .ink-canvas-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ink-header { padding: 14px 20px; border-bottom: 1px solid #e4e7ef; flex-shrink: 0; }
+.ink-header strong { font-size: 17px; }
+.ink-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ink-manager-body { display: grid; grid-template-columns: 200px minmax(0, 1fr); flex: 1; min-height: 0; }
+.ink-packages { display: flex; flex-direction: column; gap: 14px; border-right: 1px solid #e4e7ef; overflow: auto; }
+.ink-package-list { display: flex; flex-direction: column; gap: 8px; flex: 1; overflow: auto; min-height: 80px; }
+.ink-package-list .button { justify-content: flex-start; text-align: left; flex-shrink: 0; }
+.ink-package-list span { min-width: 0; overflow-wrap: anywhere; }
+.ink-package-list small { display: block; font-size: 11px; margin-top: 5px; }
+.ink-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 20px; gap: 16px; background: #f4f5f9; overflow: auto; }
+.ink-package-heading h2 { font-size: 22px; overflow-wrap: anywhere; }
+.ink-package-heading h2 small { font-size: 12px; font-weight: normal; }
+.ink-package-heading { flex-shrink: 0; flex-wrap: wrap; }
+.ink-tabs { display: flex; gap: 8px; flex-shrink: 0; }
+.inkfont-dialog .button[aria-pressed="true"], .inkfont-dialog .icon-button[aria-pressed="true"] { background: #f3f0fc; border-color: #8878ce; color: #6554b5; }
+.ink-character-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, .65fr); gap: 16px; flex: 1; min-height: 220px; }
+.ink-characters, .ink-variants, .ink-preview { display: flex; flex-direction: column; gap: 10px; background: white; border: 1px solid #e4e7ef; border-radius: 8px; overflow: auto; }
+.ink-search { display: flex; align-items: center; gap: 8px; }
+.ink-search input { min-width: 0; }
+.ink-character-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); grid-auto-rows: max-content; gap: 10px; min-height: 0; overflow: auto; align-content: start; }
+.ink-character-card.button { display: flex; flex-direction: column; height: auto; min-height: 134px; padding: 9px; min-width: 0; }
+.ink-character-card svg { width: 100%; height: 90px; flex-shrink: 0; }
+.ink-character-card > span { display: flex; width: 100%; justify-content: space-between; gap: 4px; }
+.ink-character-card small { font-size: 10px; }
+.ink-variant-list { display: flex; flex-direction: column; gap: 12px; flex: 1; overflow: auto; min-height: 90px; }
+.ink-variant { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; padding: 10px; border: 1px solid #e4e7ef; border-radius: 8px; }
+.ink-variant > svg { width: 90px; height: 90px; background: #faf9f7; }
+.ink-package-footer { flex-shrink: 0; }
+.ink-status { padding: 10px 20px; border-top: 1px solid #e4e7ef; min-height: 44px; flex-shrink: 0; }
+.ink-error { color: #b63c50; overflow-wrap: anywhere; }
+.ink-empty { margin: auto; text-align: center; }
+.ink-preview { flex: 1; }
+.ink-preview-lines { display: flex; align-content: flex-start; gap: 6px; flex-wrap: wrap; overflow: auto; }
+.ink-preview-glyph { flex: 0 0 auto; position: relative; padding-bottom: 18px; }
+.ink-preview-glyph svg { display: block; overflow: visible; }
+.ink-preview-glyph > span { width: 36px; height: 72px; }
+.ink-preview-glyph > span { display: grid; place-items: center; font-size: 28px; }
+.ink-preview-glyph small { position: absolute; bottom: 0; left: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+.ink-preview-break { flex-basis: 100%; }
+.ink-editor-body { display: grid; grid-template-columns: 160px minmax(0, 1fr) 270px; flex: 1; min-height: 0; }
+.ink-strokes { display: flex; flex-direction: column; border-right: 1px solid #e4e7ef; overflow: auto; }
+.ink-stroke-list { display: flex; flex-direction: column; gap: 6px; overflow: auto; }
+.ink-stroke-list .button { display: flex; justify-content: flex-start; padding: 5px; gap: 6px; flex-shrink: 0; }
+.ink-stroke-list svg { width: 34px; height: 34px; }
+.inkfont-dialog .ink-canvas-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ink-canvas-panel .canvas-toolbar { flex-wrap: wrap; height: auto; overflow: visible; }
+.ink-canvas { position: relative; flex: 1; min-height: 0; background: #f2f1f6; }
+.ink-canvas-character { position: absolute; top: 12px; left: 16px; z-index: 1; max-width: calc(100% - 32px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 28px; line-height: 1.3; font-weight: 600; color: var(--text); pointer-events: none; user-select: none; }
+.ink-canvas > svg { width: 100%; height: 100%; display: block; touch-action: none; }
+.ink-canvas .canvas-edit-layer polyline { stroke-width: 1.8px; vector-effect: non-scaling-stroke; }
+.ink-canvas-footer { padding: 8px; flex-wrap: wrap; border-top: 1px solid #e4e7ef; font-size: 11px; }
+.ink-properties { overflow: auto; border-left: 1px solid #e4e7ef; }
+.ink-properties > label { display: block; margin: 12px 0; }
+.ink-properties .selection-fields { display: flex; flex-wrap: wrap; }
+.ink-properties .selection-inspector { margin-top: 16px; }
+.ink-properties .selection-inspector p { display: none; }
+.ink-confirm label { display: block; margin: 16px 0; }
+@media (max-width: 1100px) {
+  .ink-manager-body { grid-template-columns: 170px minmax(0, 1fr); }
+  .ink-main { padding: 14px; }
+  .ink-character-body { grid-template-columns: minmax(0, 1fr) 270px; gap: 10px; }
+  .ink-editor-body { grid-template-columns: 120px minmax(0, 1fr) 240px; }
+  .ink-stroke-list .button > span:last-child { display: none; }
+}
+@media (max-width: 780px) {
+  .ink-manager-body { grid-template-columns: 140px minmax(0, 1fr); }
+  .ink-character-body { grid-template-columns: 1fr; overflow: auto; }
+  .ink-characters, .ink-variants { min-height: 240px; }
+  .ink-editor-body { grid-template-columns: minmax(0, 1fr) 210px; }
+  .ink-strokes { display: none; }
+}

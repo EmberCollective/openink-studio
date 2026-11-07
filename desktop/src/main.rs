@@ -7,6 +7,8 @@ mod project;
 mod paper;
 mod device;
 mod glyphs;
+mod inkfont_import;
+mod inkfont;
 mod import;
 mod job_timing;
 #[cfg(feature = "private-gfont")]
@@ -61,11 +63,16 @@ fn main() {
             commands::save_template,
             commands::delete_template,
             commands::list_fonts,
+            inkfont_import::inkfont_recognize,
+            inkfont_import::inkfont_preview_page,
+            inkfont_import::inkfont_refit,
             commands::import_template,
             commands::export_template,
             commands::list_glyph_fonts,
             commands::save_glyph,
-            commands::glyph_font_document
+            commands::glyph_font_document,
+            inkfont::inkfont_list, inkfont::inkfont_load, inkfont::inkfont_save,
+            inkfont::inkfont_import, inkfont::inkfont_export, inkfont::inkfont_delete
             ];
             #[cfg(feature = "private-gfont")]
             let private_handler: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![commands::list_legacy_fonts, commands::import_legacy_fonts, commands::delete_legacy_font, commands::legacy_font_document];

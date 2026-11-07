@@ -68,17 +68,6 @@ export function CanvasCoordinates({
     outside = mappedOrigin ? outsideDirection(mappedOrigin, width, height) : "";
   return (
     <g className="coordinate-overlay" pointerEvents="none">
-      <text
-        x={8 * unit}
-        y={9 * unit}
-        fontSize={font}
-        fill="#78838f"
-        stroke="white"
-        strokeWidth={2 * unit}
-        paintOrder="stroke"
-      >
-        画布 (0,0)
-      </text>
       {first && marker("start", first, "#cf8e4a", startLabel, -8)}
       {!mapped?.pen && draftPen && marker("pen-draft", { x: draftPen[0], y: draftPen[1] }, "#6494b2", "默认笔尖（末点）", 15)}
       {mappedOrigin && !outside && (

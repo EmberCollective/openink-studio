@@ -6,6 +6,10 @@ export function guideLineNumber(line: GuideLine, index: number): number {
   return Number.isSafeInteger(number) ? number : index + 1;
 }
 export type TextSettings = {
+  line_gap_mm?: number;
+  paragraph_indent?: boolean;
+  indent_chars?: number;
+  alignment?: "left" | "center" | "right" | "justify";
   font_rules?: FontRuleLibrary;
   jitter?: { x_mm_min?: number; y_mm_min?: number; rotation_deg_min?: number; scale_x_percent_min?: number; scale_y_percent_min?: number; scale_percent_min?: number; x_mm: number; y_mm: number; rotation_deg: number; scale_x_percent: number; scale_y_percent: number; scale_percent: number };
   text: string; font_mode: "regular" | "glyph" | "legacy"; font_path: string; glyph_path: string;
@@ -18,6 +22,10 @@ export function validTextSettings(value: unknown): value is TextSettings {
   const range = (n: number, lo: number, hi: number) => Number.isFinite(n) && n >= lo && n <= hi;
   const jitterRange = (min: number | undefined, max: number, limit: number) => range(min ?? -max, -limit, limit) && range(max, -limit, limit) && (min ?? -max) <= max;
   return (v.font_rules === undefined || validRuleLibrary(v.font_rules)) && typeof v.text === "string" && v.text.length <= 1_000_000 && ["regular", "glyph", "legacy"].includes(v.font_mode)
+    && (v.line_gap_mm === undefined || range(v.line_gap_mm, 0, 100))
+    && (v.paragraph_indent === undefined || typeof v.paragraph_indent === "boolean")
+    && (v.indent_chars === undefined || (Number.isInteger(v.indent_chars) && range(v.indent_chars, 0, 10)))
+    && (v.alignment === undefined || ["left", "center", "right", "justify"].includes(v.alignment))
     && typeof v.font_path === "string" && typeof v.glyph_path === "string" && typeof v.centerline === "boolean"
     && ["free", "lines"].includes(v.placement) && Number.isInteger(v.start_line) && range(v.start_line, 0, 10000)
     && (v.jitter === undefined || (!!v.jitter && jitterRange(v.jitter.x_mm_min, v.jitter.x_mm, 20) && jitterRange(v.jitter.y_mm_min, v.jitter.y_mm, 20) && jitterRange(v.jitter.rotation_deg_min, v.jitter.rotation_deg, 180) && jitterRange(v.jitter.scale_x_percent_min, v.jitter.scale_x_percent, 50) && jitterRange(v.jitter.scale_y_percent_min, v.jitter.scale_y_percent, 50) && jitterRange(v.jitter.scale_percent_min, v.jitter.scale_percent, 50)))

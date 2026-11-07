@@ -34,11 +34,12 @@ jobs:
         run: |
           import json, os, pathlib, re
           tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'\d+\.\d+\.\d+', tag), 'Invalid version tag'
+          assert re.fullmatch(r'\d+\.\d+\.\d+(?:-preview)?', tag), 'Invalid version tag'
           assert json.loads(pathlib.Path('desktop/package.json').read_text())['version'] == tag, 'Version differs from tag'
           changelog = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
           sections = re.split(r'^## ', changelog, flags=re.M)
-          matching = [section for section in sections[1:] if section.splitlines()[0].startswith(tag + ' · ')]
+          heading = tag.replace('-preview', ' Preview')
+          matching = [section for section in sections[1:] if section.splitlines()[0].startswith(heading + ' · ')]
           assert len(matching) == 1, 'Missing or duplicate changelog section'
           pathlib.Path('release-notes.md').write_text(matching[0].split('\n', 1)[1].strip() + '\n', encoding='utf-8')
       - name: Publish release
@@ -49,5 +50,10 @@ jobs:
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             echo "Release already exists; leaving it unchanged."
           else
-            gh release create "$RELEASE_TAG" --verify-tag --title "OpenInk Studio $RELEASE_TAG" --notes-file release-notes.md --latest
+            if [[ "$RELEASE_TAG" == *-preview ]]; then
+              release_mode=--prerelease
+            else
+              release_mode=--latest
+            fi
+            gh release create "$RELEASE_TAG" --verify-tag --title "OpenInk Studio $RELEASE_TAG" --notes-file release-notes.md "$release_mode"
           fi

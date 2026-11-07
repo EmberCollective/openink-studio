@@ -91,7 +91,10 @@ export function useCanvasEditing({
   strokeColor,
   pasteBatch,
   snapGuides = [],
+  focusScope = ".canvas-panel",
+  canvasBounds,
 }: {
+  canvasBounds?: Bounds;
   document: Drawing | null;
   sourceKey: unknown;
   locked: boolean;
@@ -100,6 +103,7 @@ export function useCanvasEditing({
   strokeColor?: (document: Drawing, index: number) => string | undefined;
   pasteBatch?: string;
   snapGuides?: { start: [number, number]; end: [number, number] }[];
+  focusScope?: string;
   onResetWritten?: (selection: number[]) => void;
   onChange: (d: Drawing) => void;
   onMessage: (message: string) => void;
@@ -282,7 +286,7 @@ export function useCanvasEditing({
     }
     window.addEventListener("keydown", keyboard);
     const outside = (e: globalThis.PointerEvent) => {
-      canvasFocused.current = !!(e.target as Element).closest(".canvas-panel");
+      canvasFocused.current = !!(e.target as Element).closest(focusScope);
     };
     window.addEventListener("pointerdown", outside);
     return () => {
@@ -448,10 +452,10 @@ export function useCanvasEditing({
     >
       {active && visible && (
         <rect
-          x={0}
-          y={0}
-          width={visible.width_mm}
-          height={visible.height_mm}
+          x={canvasBounds?.x ?? 0}
+          y={canvasBounds?.y ?? 0}
+          width={canvasBounds?.width ?? visible.width_mm}
+          height={canvasBounds?.height ?? visible.height_mm}
           fill="transparent"
         />
       )}
@@ -664,6 +668,7 @@ export function useCanvasEditing({
     inspector,
     displayDocument: visible,
     clearSelection: () => setSelection([]),
+    selectPaths: (ids: number[]) => setSelection(ids.filter(i => Number.isInteger(i) && i >= 0 && i < (document?.strokes.length || 0))),
     commitAll: (next: Drawing, selection: number[] = []) => commit(next, selection),
     hasEdits: history.length > 0,
   };
