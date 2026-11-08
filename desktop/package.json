@@ -2,7 +2,7 @@
   "name": "openink-studio-desktop",
   "private": true,
   "version": "0.5.0-preview",
-  "license": "GPL-2.0-only",
+  "license": "GPL-3.0-only",
   "scripts": {
     "version:sync": "node scripts/sync-version.mjs",
     "version": "npm run version:sync",
