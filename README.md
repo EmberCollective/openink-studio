@@ -12,10 +12,20 @@
 <p align="center">
   <a href="#界面预览">界面预览</a> ·
   <a href="#从底稿到纸面">功能</a> ·
-  <a href="#从源码启动">快速开始</a> ·
+  <a href="#开始使用">快速开始</a> ·
+  <a href="https://embercollective.github.io/openink-studio-wiki/">图文教程</a> ·
   <a href="./CHANGELOG.md">更新日志</a> ·
   <a href="./docs/README.md">文档</a>
 </p>
+
+## 开始使用
+
+从 [Releases](https://github.com/EmberCollective/openink-studio/releases) 获取对应版本，第一次使用可以跟着 [OpenInk Studio 图文教程](https://embercollective.github.io/openink-studio-wiki/) 完成书写：
+
+- [在空白纸上写一句话](https://embercollective.github.io/openink-studio-wiki/guide/first-write/)：选择 A4 画布、输入文字、连接设备，写出第一句“你好”。
+- [把文字填进 PDF 底稿](https://embercollective.github.io/openink-studio-wiki/guide/pdf-write/)：导入背景、排好文字、完成两点校准，在指定位置书写。
+
+教程含界面配图与定位示意，截图版本和适用范围见站内说明。开发者可继续阅读[从源码启动](#从源码启动)。
 
 ## 界面预览
 
