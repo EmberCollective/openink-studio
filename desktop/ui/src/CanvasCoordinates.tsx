@@ -9,7 +9,6 @@ export function CanvasCoordinates({
   height,
   pixelsPerMm,
   startLabel = "路径起点",
-  draftPen,
 }: {
   registration?: Registration;
   first: Point | null;
@@ -19,7 +18,6 @@ export function CanvasCoordinates({
   height: number;
   pixelsPerMm: number;
   startLabel?: string;
-  draftPen?: number[] | null;
 }) {
   const mapped = origin ? mapMachineCoordinates(origin, position, registration) : null;
   const unit = 1 / Math.max(0.2, pixelsPerMm),
@@ -44,8 +42,8 @@ export function CanvasCoordinates({
           cx={p.x}
           cy={p.y}
           r={coincide ? r * 1.6 : r}
-          fill={coincide || kind.endsWith("-draft") ? "none" : color}
-          stroke={coincide || kind.endsWith("-draft") ? color : "white"}
+          fill={coincide ? "none" : color}
+          stroke={coincide ? color : "white"}
           strokeWidth={unit}
         />
         <text
@@ -69,7 +67,6 @@ export function CanvasCoordinates({
   return (
     <g className="coordinate-overlay" pointerEvents="none">
       {first && marker("start", first, "#cf8e4a", startLabel, -8)}
-      {!mapped?.pen && draftPen && marker("pen-draft", { x: draftPen[0], y: draftPen[1] }, "#6494b2", "默认笔尖（末点）", 15)}
       {mappedOrigin && !outside && (
         <g
           data-coordinate="origin"
@@ -106,7 +103,7 @@ export function CanvasCoordinates({
             strokeWidth={2.3 * unit}
             paintOrder="stroke"
           >
-            工作原点 (0,0)
+            定位点1
           </text>
         </g>
       )}

@@ -25,7 +25,7 @@ export function resizePositioning(setup: RegistrationSetup, before: Layout, afte
   if (!validRegistrationPoints(points, after.width_mm, after.height_mm)) {
     points = [[after.width_mm, 0], [0, after.height_mm], ...(setup.point3 ? [[0, 0]] : [])];
   }
-  return { setup: { ...setup, points: points.slice(0, 2), ...(setup.point3 ? { point3: points[2] } : {}), selected_profile: "" }, origin: [...points[0]], pen: [...points[points.length - 1]] };
+  return { ...setup, points: points.slice(0, 2), ...(setup.point3 ? { point3: points[2] } : {}), selected_profile: "" };
 }
 
 export function validateLayout(layout: Layout): void {

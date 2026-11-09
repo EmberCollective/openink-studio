@@ -36,3 +36,8 @@ desktop/src/legacy_font.rs
 *.pem
 *.p12
 *.pfx
+
+# 临时文件夹
+.tmp/
+.claude/
+/private.zip

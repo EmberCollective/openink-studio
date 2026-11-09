@@ -47,7 +47,7 @@ export async function projectChecks(){
   await click('打开工程');await poll();
   assert.deepEqual(paths(),['22,33 44,55']);
   await click('设备控制');
-  assert.ok(document.body.textContent?.includes('工作原点（工程保存，待两点校准）：画布 X 210.00 / Y 0.00'));
+  assert.equal((document.querySelector('input[aria-label="第1点X"]') as HTMLInputElement).value,'210');
   assert.equal(document.body.textContent?.includes('工程已打开，请重新进行纸面校准'),false);
   assert.equal((document.querySelector('select[aria-label="校准方式"]') as HTMLSelectElement).value,'two');
   for(const [label,v] of [['描线速率',1234],['移动速度',2345],['Z速率',456],['落笔下探',5]])assert.equal((document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement).value,String(v));
@@ -60,7 +60,7 @@ export async function projectChecks(){
   assert.equal(saved!.pages.length,2);
   assert.equal("width_mm" in saved!.pages[0].background!,false);assert.equal("height_mm" in saved!.pages[0].background!,false);
   assert.equal(requests.some(r=>r.name==='device_command'&&r.args.command.type==='forget_calibration'),true,'Opening clears the previous device session while preserving page scales');
-  assert.equal(button('重置到画布左上角').disabled,true,'A saved scale cannot bypass the required new alignment');
+  assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.trim()==='重置到画布左上角'),false,'No separate work-origin configuration');
   events.push({type:'connected',port:'MOCK'},{type:'status',status:{state:'Idle',position:[0,0,0],wco:[0,0,0]}});await poll();
   assert.ok(document.body.textContent?.includes('请用两点校准当前旋转；横纵比例沿用保存值'));
   assert.equal(requests.some(r=>r.name==='device_command'&&r.args.command.type==='apply_registration'),false,'Opening must not apply the saved rotation');
@@ -84,7 +84,7 @@ export async function projectChecks(){
   assert.ok(document.body.textContent?.includes('此版本不支持原版 gfont'));
   assert.deepEqual(paths(),['22,33 44,55'],'Rejected regeneration must preserve existing paths');
   assert.ok(!requests.some(r=>r.name==='legacy_font_document'||r.name==='list_legacy_fonts'));
-  await click('保存工程');assert.deepEqual(saved!.pages[0].document.text_settings,{...privateText,jitter:{x_mm:0,y_mm:0,rotation_deg:0,scale_x_percent:0,scale_y_percent:0,scale_percent:0},font_rules:{rules:[],selected:""}},'Saving publicly must retain private text settings and normalize absent jitter and rule library');
+  await click('保存工程');assert.deepEqual(saved!.pages[0].document.text_settings,{...privateText,alignment:'left',paragraph_indent:false,indent_chars:2,jitter:{x_mm:0,y_mm:0,rotation_deg:0,scale_x_percent:0,scale_y_percent:0,scale_percent:0},font_rules:{rules:[],selected:""}},'Saving publicly must retain private text settings and normalize absent paragraph, jitter and rule library settings');
   // Opening a background-only current page renders the packaged PDF before replacing state.
   value.current_page=1;await click('打开工程');assert.deepEqual(paths(),[]);assert.ok(document.querySelector('image[aria-label="PDF 背景（不可选中）"]'));
   saved=null;await click('保存工程');assert.ok(saved,'Reopened project with regenerated preview must save');assert.equal(saved!.current_page,1);assert.deepEqual(saved!.pages[0].document.strokeIds,['restored-1']);

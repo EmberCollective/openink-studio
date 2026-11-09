@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import assert from "node:assert/strict";
 import { RegistrationPanel, type RegistrationSetup } from "../ui/src/RegistrationPanel";
 import { canvasToMachine, mapMachineCoordinates, validRegistrationPoints, type Registration } from "../ui/src/coordinateGeometry";
-import { writableArea, AXIS_LIMITS_MM } from "../ui/src/writableArea";
+import { writableArea } from "../ui/src/writableArea";
 import { createRoutePlanner, type RouteRequest } from "../ui/src/useRoutePlan";
 import { calibratedRouteComparison, measureRoute } from "../ui/src/routeMetrics";
 import type { RouteVariant } from "../ui/src/RouteComparison";
@@ -31,11 +31,7 @@ export async function threePointChecks() {
   assert.equal(validRegistrationPoints([[0, 0], [200, 0], [200, 1]], 210, 297), false);
   assert.equal(validRegistrationPoints([[0, 0], [200, 0], [0, 99]], 210, 297), false);
   assert.equal(validRegistrationPoints([[0, 0], [200, 0], [0, 200]], 210, 297), true);
-  const area = writableArea(210, 297, 0, [0, 0], null, registration)!;
-  for (const p of [{x: area.x, y: area.y}, {x: area.x + area.width, y: area.y + area.height}]) {
-    const machine = canvasToMachine(p, [0, 0], registration);
-    assert.ok(Math.abs(machine.x) <= AXIS_LIMITS_MM[0] + 1e-8 && Math.abs(machine.y) <= AXIS_LIMITS_MM[1] + 1e-8);
-  }
+  assert.deepEqual(writableArea(420,600,0),{x:0,y:0,width:420,height:600});
   const root = createRoot(document.getElementById("root")!);
   const commands: any[] = [];
   let version = 0, captured = 0, session = 0, positioning = false, ready = true, locked = false, complete = 0, switched = 0;

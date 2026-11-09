@@ -18,7 +18,8 @@ import { blankBackground, guideLineNumber, validTextSettings, type BackgroundPag
 import Toggle from "./Toggle";
 import RegistrationHandles from "./RegistrationHandles";
 import { RegistrationPanel, type RegistrationProfile, type RegistrationSetup } from "./RegistrationPanel";
-import { identityRegistration, canvasToMachine, registrationMatrix, registrationScales, scaledRegistration, type Registration } from "./coordinateGeometry";
+import { machineScene } from "./machineScene";
+import { identityRegistration, registrationMatrix, registrationScales, scaledRegistration, type Registration } from "./coordinateGeometry";
 import { ensureStrokeIds, unwrittenDocument, completedStrokeIds, resetWrittenSelection, markCompletedStroke } from "./writtenTracking";
 import { DraftNumberInput } from "./DraftNumberInput";
 import { useRoutePlan, type RouteSnapshot } from "./useRoutePlan";
@@ -28,7 +29,7 @@ import { calibratedRouteComparison } from "./routeMetrics";
 import { JobTiming } from "./JobTiming";
 import { beginJobTiming, cancelJobTiming, emptyJobTiming, updateJobTiming } from "./jobTimingModel";
 import { DocumentEditLock, documentEditPolicy } from "./documentEditPolicy";
-import { writableArea, boundsWithinArea, AXIS_LIMITS_MM } from "./writableArea";
+import { writableArea } from "./writableArea";
 import { applyLayoutToPages, applyScaleToPages, normalizeLayouts, resizePositioning, type Layout } from "./layoutGeometry";
 import { LayoutPagesDialog } from "./LayoutPagesDialog";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -567,7 +568,6 @@ export default function App() {
   const [registrationPointEdit, setRegistrationPointEdit] = useState<{ index: number; point: number[] } | null>(null);
   const [registrationErrorVersion, setRegistrationErrorVersion] = useState(0);
   const [positioning, setPositioning] = useState(false);
-  const resetOriginLayout = useRef<string | null>(null);
   const [automaticOrigin, setAutomaticOrigin] = useState(true);
   const [allowReverse, setAllowReverse] = useState(true);
   const [optimizeTrajectory, setOptimizeTrajectory] = useState(true);
@@ -605,7 +605,11 @@ export default function App() {
   const machineBusy = jobLocked || running || positioning || recovering;
   const connectionAttempt = useRef(false);
   const [viewRotation, setViewRotation] = useState(0);
-  const [referenceFollowsCanvas, setReferenceFollowsCanvas] = useState(false);
+  const paperAngleRef = useRef(viewRotation);
+  paperAngleRef.current = viewRotation;
+  const scene = machineScene(template.width_mm, template.height_mm, viewRotation);
+  const sceneRef = useRef(scene);
+  sceneRef.current = scene;
   const [showMachineReference, setShowMachineReference] = useState(true);
   const [showGuideNumbers, setShowGuideNumbers] = useState(true);
   const [zoom, setZoom] = useState(1),
@@ -632,15 +636,13 @@ export default function App() {
   const [tab, setTab] = useState<"text" | "file">("text");
   const rightScroll = useRef<HTMLDivElement>(null);
   const [canvasTool, setCanvasTool] = useState<"select" | "pan">("select");
-  const [placingOrigin, setPlacingOrigin] = useState(false);
-  const [originDraft, setOriginDraft] = useState<number[] | null>(null);
-  const [penDraft, setPenDraft] = useState<number[] | null>(null);
+  const [selectingAlignmentPoint, setSelectingAlignmentPoint] = useState(false);
   const pan = useCanvasPan(canvasTool === "pan");
   useEffect(() => {
-    if (machineBusy || busy || registrationLocked || paperWizard || inkFontOpen) setPlacingOrigin(false);
+    if (machineBusy || busy || registrationLocked || paperWizard || inkFontOpen) setSelectingAlignmentPoint(false);
   }, [machineBusy, busy, registrationLocked, paperWizard, inkFontOpen]);
   useEffect(() => {
-    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setPlacingOrigin(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setSelectingAlignmentPoint(false); };
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
   }, []);
@@ -732,7 +734,7 @@ export default function App() {
       setConfirmedOrigin(null);
     }
     try {
-      await call("device_command", { command: isConnecting ? { ...command, swap_xy: swapXY } : command });
+      await call("device_command", { command: isConnecting ? { ...command, swap_xy: swapXY } : sceneRef.current.request(command) });
       return true;
     } catch (e) {
       if (isConnecting) { setConnectionError(true); setConnecting(false); connectionAttempt.current = false; }
@@ -769,22 +771,16 @@ export default function App() {
     if (!(await command(request))) { setPositioning(false); return false; }
     return true;
   }
-  function setWorkOrigin(point: { x: number; y: number }) {
-    if (!confirmedOrigin && (currentLayout.scale_x !== undefined)) return;
-    const target = [Number(point.x.toFixed(3)), Number(point.y.toFixed(3))];
-    const pen = coordinateMapping?.pen || { x: target[0], y: target[1] };
-    const previousOrigin = originDraft, previousPen = penDraft;
-    setPlacingOrigin(false); setCanvasTool("select");
-    setOriginDraft(target); setPenDraft([pen.x, pen.y]);
-    notify("正在自动抬笔并将所选点设为工作原点");
-    void issuePositioning({
-      type: "calibrate",
-      canvas_x: pen.x,
-      canvas_y: pen.y,
-      origin_x: target[0],
-      origin_y: target[1],
-      raised_confirmed: true,
-    }).then(ok => { if (!ok) { setOriginDraft(previousOrigin); setPenDraft(previousPen); } });
+  function selectAlignmentPoint(point: { x: number; y: number }) {
+    setRegistrationPointEdit({ index: 0, point: [point.x, point.y] });
+    setSelectingAlignmentPoint(false); setCanvasTool("select");
+  }
+  async function alignTipToFirstPoint() {
+    if (!canJog || busy || registrationLocked || paperWizard) return;
+    const first = registrationSetup?.points[0] || [template.width_mm, 0];
+    const point = scene.point({ x: first[0], y: first[1] });
+    const mapping = scene.toMachineMapping(confirmedOrigin ? registration : scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1, -viewRotation));
+    await issuePositioning({ type: "apply_registration", origin: [point.x, point.y], ...mapping });
   }
   const positionKnown =
     status.position?.length === 3 && status.position.every(Number.isFinite);
@@ -948,10 +944,6 @@ export default function App() {
   const coordinateMapping = coordinateOrigin
     ? mapMachineCoordinates(coordinateOrigin, coordinatePosition, registration)
     : null;
-  const defaultLayoutOrigin = registrationSetup?.points[0] || [template.width_mm, 0];
-  const defaultLayoutPen = registrationSetup?.point3 || registrationSetup?.points[1] || [15, template.height_mm - 15];
-  const displayedOrigin = confirmedOrigin || (projectNeedsAlignment ? projectCalibration?.origin : null) || originDraft || defaultLayoutOrigin;
-  const displayedPen = coordinateMapping?.pen ? [coordinateMapping.pen.x, coordinateMapping.pen.y] : penDraft || defaultLayoutPen;
   const routeRequest = useMemo(() => pendingDoc ? ({
     document: pendingDoc,
     start: automaticOrigin ? null : coordinateMapping?.pen || null,
@@ -1037,22 +1029,14 @@ export default function App() {
       height: Number.isFinite(maxy) ? maxy - miny : 0,
     };
   }, [pendingDoc]);
-  const machinePoints = !automaticOrigin && confirmedOrigin ? (pendingDoc?.strokes || []).flat().map(p => canvasToMachine(p, confirmedOrigin, registration)) : [];
-  const machineBounds = machinePoints.reduce((b, p) => ({ minx: Math.min(b.minx, p.x), maxx: Math.max(b.maxx, p.x), miny: Math.min(b.miny, p.y), maxy: Math.max(b.maxy, p.y) }), { minx: Infinity, maxx: -Infinity, miny: Infinity, maxy: -Infinity });
-  const physicalExceeds = machinePoints.length ? machineBounds.maxx - machineBounds.minx > AXIS_LIMITS_MM[0] || machineBounds.maxy - machineBounds.miny > AXIS_LIMITS_MM[1] : bounds.width > AXIS_LIMITS_MM[0] || bounds.height > AXIS_LIMITS_MM[1];
   const pageExceeds =
     !!preparedDoc?.strokes.length &&
     (bounds.x < -0.001 ||
       bounds.y < -0.001 ||
       bounds.x + bounds.width > template.width_mm + 0.001 ||
       bounds.y + bounds.height > template.height_mm + 0.001);
-  const fitArea = writableArea(
-    template.width_mm, template.height_mm, 0,
-    !automaticOrigin && confirmedOrigin ? confirmedOrigin : [0, 0], !automaticOrigin ? coordinatePosition : null,
-    automaticOrigin ? identityRegistration : registration,
-  );
-  const placementExceeds = machinePoints.length ? machinePoints.some(p => Math.abs(p.x) > AXIS_LIMITS_MM[0] + .001 || Math.abs(p.y) > AXIS_LIMITS_MM[1] + .001 || !!coordinatePosition && (Math.abs(p.x - coordinatePosition[0]) > AXIS_LIMITS_MM[0] + .001 || Math.abs(p.y - coordinatePosition[1]) > AXIS_LIMITS_MM[1] + .001)) : !!preparedDoc?.strokes.length && !boundsWithinArea(bounds, fitArea);
-  const exceeds = physicalExceeds || pageExceeds || placementExceeds;
+  const fitArea = writableArea(template.width_mm, template.height_mm, 0);
+  const exceeds = pageExceeds;
   const runReason = machineBusy
     ? "设备正在作业或走位，编辑已锁定"
     : batchReview.has(reviewKey)
@@ -1062,7 +1046,7 @@ export default function App() {
       : !automaticOrigin && !machineOriginReady
         ? projectNeedsAlignment
           ? projectCalibration ? "工程已打开：请用两点校准当前旋转；横纵比例沿用保存值" : "请用两点校准当前旋转"
-          : "正在恢复工程工作原点"
+          : "正在恢复工程定位点"
       : status.state !== "Idle"
         ? `等待设备空闲：${status.state}`
         : !positionKnown
@@ -1071,13 +1055,7 @@ export default function App() {
                   ? "请先关闭字形提取，返回编辑作品"
                   : !pendingDoc?.strokes.some((s) => s.length > 1)
                     ? preparedDoc?.strokes.some((s) => s.length > 1) ? "当前批次没有待写内容；在线路中选择其他批次，或明确重置书写标记" : "请先导入或生成书写路径"
-                    : physicalExceeds
-                        ? "墨迹跨度超过当前 A4 工作范围（X 210 / Y 297 mm）"
-                        : pageExceeds
-                          ? "墨迹超出画布，请移动、改尺寸或一键适配"
-                          : placementExceeds
-                            ? `超出当前软件范围（X 210 / Y 297 mm）。画布允许区域：${fitArea ? `X ${fitArea.x.toFixed(1)}–${(fitArea.x + fitArea.width).toFixed(1)}，Y ${fitArea.y.toFixed(1)}–${(fitArea.y + fitArea.height).toFixed(1)} mm` : "与纸面无交集"}；请检查原点与笔尖定位`
-                            : "";
+                    : "";
   const canRun = !runReason && !busy && !machineBusy && !registrationLocked && !paperWizard;
   function fitToPage() {
     if (
@@ -1089,14 +1067,14 @@ export default function App() {
     )
       return;
     if (!fitArea) {
-      notify("画布与当前可达范围没有交集，请重新校准工作原点及笔尖", true);
+      notify("画布与当前可达范围没有交集，请重新校准定位点及笔尖", true);
       return;
     }
     const factor =
-      Math.min(AXIS_LIMITS_MM[0], fitArea.width) /
+      fitArea.width /
       (bounds.width || 1);
     const factorY =
-      Math.min(AXIS_LIMITS_MM[1], fitArea.height) /
+      fitArea.height /
       (bounds.height || 1);
     const ratio = Math.min(factor, factorY) * 0.99;
     const ids = preparedDoc.strokes.map((_, i) => i);
@@ -1233,18 +1211,17 @@ export default function App() {
           setJobTiming((state) => updateJobTiming(state, e, receivedAt, eventEpoch));
           switch (e.type) {
             case "origin_mode":
-              setAutomaticOrigin(e.automatic !== false);
+              setAutomaticOrigin(e.automatic !== false && paperAngleRef.current === 0);
               break;
             case "ports":
               setPorts(e.ports || []);
               setPort((p) => p || e.ports?.[0]?.name || "");
               break;
             case "connected":
-              resetOriginLayout.current = null;
               setRegistration(preservedRegistrationRef.current || identityRegistration); setRegistrationLocked(false); setSessionVersion(v => v + 1);
               setMachineOriginReady(false);
               setConfirmedOrigin(null);
-              if (projectCalibrationRef.current || currentLayoutRef.current.scale_x !== undefined) { setAutomaticOrigin(false); setProjectNeedsAlignment(true); }
+              if (paperAngleRef.current !== 0 || projectCalibrationRef.current || currentLayoutRef.current.scale_x !== undefined) { setAutomaticOrigin(false); setProjectNeedsAlignment(true); }
               else setAutomaticOrigin(true);
               connectionAttempt.current = false;
               setConnecting(false);
@@ -1256,7 +1233,6 @@ export default function App() {
               recordInterruptedBatch();
               setConnecting(false);
               connectionAttempt.current = false;
-              resetOriginLayout.current = null;
               setRegistration(preservedRegistrationRef.current || identityRegistration); setRegistrationLocked(false); setSessionVersion(v => v + 1);
               submittedStrokes.current = null;
               submittedOrderedIds.current = [];
@@ -1329,7 +1305,7 @@ export default function App() {
             case "registration_changed":
               {
                 const next = { scale: e.scale || 1, rotation_deg: e.rotation_deg || 0, ...(e.matrix ? { matrix: e.matrix } : {}) };
-                setRegistration(next);
+                setRegistration(sceneRef.current.toPaperMapping(next));
                 setProjectCalibration(current => current ? { ...current, registration: next } : current);
               }
               setCalibrationVersion(v => v + 1);
@@ -1342,21 +1318,15 @@ export default function App() {
               setCalibrationVersion(v => v + 1);
               if (!e.origin) setRegistration(identityRegistration);
               if (e.origin?.length === 2 && e.origin.every(Number.isFinite)) {
-                if (resetOriginLayout.current) {
-                  const id = resetOriginLayout.current;
-                  setLayouts(current => current.map(l => l.id === id ? { ...l, scale_x: 1, scale_y: 1 } : l));
-                  resetOriginLayout.current = null;
-                }
-                const origin = [...e.origin];
+                const point = sceneRef.current.inverse({ x: e.origin[0], y: e.origin[1] });
+                const origin = [point.x, point.y];
                 setProjectNeedsAlignment(false);
                 setConfirmedOrigin(origin);
                 preservedRegistrationRef.current = null;
                 setProjectCalibration(current => current ? { ...current, origin } : current);
                 setMachineOriginReady(true);
-                setOriginDraft(null);
-                setPenDraft(null);
                 notify(
-                  `纸面校准完成：程序已抬笔，工作原点为画布 (${e.origin[0].toFixed(2)}, ${e.origin[1].toFixed(2)}) mm`,
+                  `已确认定位点1：软件机器 (${e.origin[0].toFixed(2)}, ${e.origin[1].toFixed(2)}) mm`,
                 );
               } else {
                 setConfirmedOrigin(null);
@@ -1366,7 +1336,6 @@ export default function App() {
               }
               break;
             case "error":
-              resetOriginLayout.current = null;
               setRegistrationErrorVersion(v => v + 1);
               if (connectionAttempt.current) { setConnectionError(true); setConnecting(false); connectionAttempt.current = false; }
               notify(e.message || "设备错误", true);
@@ -1805,19 +1774,22 @@ export default function App() {
       if (editingBlocked()) return false;
       installLayoutPages(updated, [...layouts.filter(l => l.id !== next.id), next]);
       if (resized) {
-        setRestoreSetup(previous => ({ version: (previous?.version || 0) + 1, value: resized.setup }));
-        setRegistrationSetup(resized.setup); setRegistrationPointEdit(null);
-        setOriginDraft(resized.origin); setPenDraft(resized.pen);
+        setRestoreSetup(previous => ({ version: (previous?.version || 0) + 1, value: resized }));
+        setRegistrationSetup(resized); setRegistrationPointEdit(null);
       }
       return true;
     } catch (error) { notify(String(error), true); return false; }
     finally { layoutChanging.current = false; setBusy(""); }
   }
   async function syncPageScale(layout: Layout) {
+    if (viewRotation !== 0 && (layout.width_mm !== template.width_mm || layout.height_mm !== template.height_mm)) {
+      await invalidatePageCalibration(true);
+      return;
+    }
     const sx = layout.scale_x ?? 1, sy = layout.scale_y ?? 1;
     const next = scaledRegistration(sx, sy, confirmedOrigin ? registration.rotation_deg : 0);
     if (confirmedOrigin) {
-      if (!await command({ type: "set_registration_scale", scales: [sx, sy] })) throw new Error("未能应用页面比例，已保留当前页面与设置");
+      if (!await command({ type: "set_registration_scale", scales: [sx, sy], mapping: registrationMatrix(scene.toMachineMapping(next)) })) throw new Error("未能应用页面比例，已保留当前页面与设置");
     }
     setRegistration(next);
     if (!confirmedOrigin && layout.scale_x !== undefined) { setAutomaticOrigin(false); setProjectNeedsAlignment(true); }
@@ -1854,10 +1826,17 @@ export default function App() {
     setConfirmedOrigin(null); setRegistration(identityRegistration);
     setMachineOriginReady(false); setProjectCalibration(null);
     setRegistrationLocked(false); setSessionVersion(v => v + 1); setProjectNeedsAlignment(needsAlignment);
-    setAutomaticOrigin(!needsAlignment);
-    const defaultOrigin = registrationSetup?.points[0] || [template.width_mm, 0];
-    setOriginDraft(needsAlignment ? [...defaultOrigin] : null);
-    setPenDraft(null);
+    setAutomaticOrigin(!needsAlignment && paperAngleRef.current === 0);
+  }
+  async function changePaperAngle(angle: number) {
+    if (!Number.isFinite(angle) || machineBusy || busy || registrationLocked || paperWizard) return;
+    const next = (angle % 360 + 360) % 360;
+    if (next === (viewRotation % 360 + 360) % 360) return;
+    await work("更新纸张方向", async () => {
+      await invalidatePageCalibration(true);
+      setViewRotation(next);
+      notify("纸张方向已更新，请对准第一点后重新校准");
+    });
   }
   function activatePage(next: Document, index: number, layout = layouts.find(l => l.id === pageLayoutIds[index]) || currentLayout) {
     setSelectedBatch(batchesOf(next).find(b => batchStatus(next, b.id, writtenIds) === "待书写")?.id || batchesOf(next)[0].id);
@@ -1925,7 +1904,7 @@ export default function App() {
       updated[index].background = { ...value, width_mm: layout.width_mm, height_mm: layout.height_mm };
       installLayoutPages(updated, [...layouts, layout], index);
       setPaperWizard(null); setPaperDraftSize(null); setPaperPreview(null); setBackgroundVisible(true); setProjectNeedsAlignment(false);
-      notify("纸张背景、横线及纸面定位已应用；工作原点已同步");
+      notify("纸张背景、横线及纸面定位已应用；定位点已同步");
     } catch (error) { notify(String(error), true); }
   }
   async function cancelPaperBackground() {
@@ -1940,11 +1919,11 @@ export default function App() {
       if (!document) throw new Error("请先生成或导入路径");
       if (!automaticOrigin && (!confirmedOrigin || registrationLocked)) throw new Error("请先完成纸面定位，再生成固定原点的作业代码");
       const value = await call<string>("generate_gcode", {
-        job: job(await currentRoute()),
+        job: job({ document: scene.document((await currentRoute()).document) }),
         relative: false,
         swap_xy: swapXY,
-        origin: automaticOrigin ? null : confirmedOrigin,
-        registration: automaticOrigin ? null : registration,
+        origin: automaticOrigin || !confirmedOrigin ? null : Object.values(scene.point({ x: confirmedOrigin[0], y: confirmedOrigin[1] })),
+        registration: automaticOrigin ? null : scene.toMachineMapping(registration),
       });
       setCode(value);
       setModal("code");
@@ -2002,9 +1981,9 @@ export default function App() {
         await call("export_gcode", {
           path,
           swap_xy: swapXY,
-          job: job(await currentRoute()),
-          origin: automaticOrigin ? null : confirmedOrigin,
-        registration: automaticOrigin ? null : registration,
+          job: job({ document: scene.document((await currentRoute()).document) }),
+          origin: automaticOrigin || !confirmedOrigin ? null : Object.values(scene.point({ x: confirmedOrigin[0], y: confirmedOrigin[1] })),
+          registration: automaticOrigin ? null : scene.toMachineMapping(registration),
         });
       else
         await call("export_document", { path, format, document: (await currentRoute()).document });
@@ -2018,12 +1997,12 @@ export default function App() {
       current_page: canvasPage, template: layoutTemplate(currentLayout),
       writing: { feed, travel_feed: travelFeed, z_feed: zFeed, z_down: zDown, jog_step: jogStep },
       routing: { optimize: optimizeTrajectory, allow_reverse: allowReverse, allow_gap: allowWritingGap, max_gap: maxWritingGap, deduplicate: deduplicateWriting },
-      calibration: { ...setup, ...(projectNeedsAlignment && !setup.point3 && projectCalibration?.point3 ? { point3: projectCalibration.point3 } : {}), origin: projectNeedsAlignment ? originDraft || projectCalibration?.origin || null : confirmedOrigin, registration: scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1), profiles: [] },
+      calibration: { ...setup, ...(projectNeedsAlignment && !setup.point3 && projectCalibration?.point3 ? { point3: projectCalibration.point3 } : {}), origin: projectNeedsAlignment ? setup.points[0] : confirmedOrigin, registration: scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1), profiles: [] },
       conversion: { dpi: options.dpi, threshold: options.threshold, conservative: options.conservative, tolerance_mm: options.tolerance_mm, filter_iterations: options.filter_iterations, error_threshold: options.error_threshold, line_threshold: options.line_threshold, despeckle_level: options.despeckle_level },
       background_visible: backgroundVisible, show_margins: showMargins,
     } satisfies Project;
   }
-  const projectSnapshot = useMemo(buildProjectSnapshot, [writtenIds, batchReview, preparedDoc, canvasPage, backgroundPages, template, layouts, pageLayoutIds, feed, travelFeed, zFeed, zDown, jogStep, optimizeTrajectory, allowReverse, allowWritingGap, maxWritingGap, deduplicateWriting, registrationSetup, projectNeedsAlignment, projectCalibration, confirmedOrigin, originDraft, registration, registrationProfiles, options, backgroundVisible, showMargins, text, fontMode, font, glyphFont, legacySelection, legacyPercent, legacyBaseline, legacySeed, centerline, textJitter, fontRules, textPlacement, lineStart, lineOffset]);
+  const projectSnapshot = useMemo(buildProjectSnapshot, [writtenIds, batchReview, preparedDoc, canvasPage, backgroundPages, template, layouts, pageLayoutIds, feed, travelFeed, zFeed, zDown, jogStep, optimizeTrajectory, allowReverse, allowWritingGap, maxWritingGap, deduplicateWriting, registrationSetup, projectNeedsAlignment, projectCalibration, confirmedOrigin, registration, registrationProfiles, options, backgroundVisible, showMargins, text, fontMode, font, glyphFont, legacySelection, legacyPercent, legacyBaseline, legacySeed, centerline, textJitter, fontRules, textPlacement, lineStart, lineOffset]);
   const projectSnapshotRef = useRef(projectSnapshot);
   projectSnapshotRef.current = projectSnapshot;
   const files = useProjectFiles({ snapshot: projectSnapshot, path: projectPath, onPath: setProjectPath,
@@ -2039,8 +2018,9 @@ export default function App() {
     if (!await command({ type: "forget_calibration" })) throw new Error("设备状态变更，请停稳后新建工程");
     if (previous !== JSON.stringify(projectSnapshotRef.current)) throw new Error("工程内容在等待期间发生变化，未新建工程，请重试");
     const empty = emptyPage(initialTemplate.width_mm, initialTemplate.height_mm);
+    setViewRotation(0);
     pageDocuments.current = new Map(); setBackgroundPages([]); setCanvasPage(0);
-    setOriginDraft(null); setPenDraft(null); setSourceDocument(empty); setEditedDocument(empty); setTemplate(initialTemplate); setSelectedTemplateId(initialTemplate.id);
+    setSourceDocument(empty); setEditedDocument(empty); setTemplate(initialTemplate); setSelectedTemplateId(initialTemplate.id);
     setLayouts([{ ...initialTemplate, source: "template" }]); setPageLayoutIds([initialTemplate.id]);
     preservedRegistrationRef.current = null; setProjectCalibration(null); setProjectNeedsAlignment(false); setConfirmedOrigin(null);
     setMachineOriginReady(false);
@@ -2075,6 +2055,7 @@ export default function App() {
       if (previous !== JSON.stringify(projectSnapshotRef.current)) throw new Error("工程内容在打开期间发生变化，未替换当前工程，请重试");
       if (!await command({ type: "forget_calibration" })) throw new Error("设备状态变更，请停稳后打开工程");
       projectLoaded.current = true;
+      setViewRotation(0);
       setLayouts(normalized.layouts); setPageLayoutIds(normalized.pages.map(p => p.layout_id!)); setSelectedTemplateId("");
       pageDocuments.current = new Map(value.pages.map((p, i) => [i, p.document]));
       setTemplate(layoutTemplate(normalized.layouts.find(l => l.id === value.pages[value.current_page].layout_id)!));
@@ -2094,7 +2075,7 @@ export default function App() {
       const candidate = calibration.origin && Math.hypot(calibration.points[1][0] - calibration.points[0][0], calibration.points[1][1] - calibration.points[0][1]) >= 100 && calibration.points.every(point => point.every((p, i) => p >= 0 && p <= (i ? value.template.height_mm : value.template.width_mm)))
         ? { id: "project-current", name: "工程中的校准方案", width_mm: value.template.width_mm, height_mm: value.template.height_mm, point1: calibration.points[0], point2: calibration.points[1], ...(calibration.point3 ? { point3: calibration.point3 } : {}), ...calibration.registration } : null;
       setRegistrationProfiles(current => [...current.filter(p => !calibration.profiles.some(q => q.id === p.id) && p.id !== "project-current"), ...calibration.profiles.filter(p => !candidate || p.id !== candidate.id), ...(candidate ? [candidate] : [])]);
-      setOriginDraft(null); setPenDraft(null); setProjectCalibration({ ...calibration, origin: savedOrigin }); setProjectNeedsAlignment(true); setConfirmedOrigin(null); setRegistration(preservedRegistration); setAutomaticOrigin(false);
+      setProjectCalibration({ ...calibration, origin: savedOrigin }); setProjectNeedsAlignment(true); setConfirmedOrigin(null); setRegistration(preservedRegistration); setAutomaticOrigin(false);
       preservedRegistrationRef.current = preservedRegistration;
       setMachineOriginReady(false);
       setRegistrationLocked(false); setRegistrationPointEdit(null);
@@ -2159,7 +2140,7 @@ export default function App() {
   const pathCount = document?.strokes.length || 0;
   const paperWidth = template.width_mm * Math.max(0.2, paperFit) * zoom,
     paperHeight = template.height_mm * Math.max(0.2, paperFit) * zoom;
-  const viewSize = referenceViewSize(paperWidth, paperHeight, viewRotation, referenceFollowsCanvas);
+  const viewSize = referenceViewSize(paperWidth, paperHeight, viewRotation);
   return (
     <DocumentEditLock.Provider value={!editPolicy.canEditDocument}>
     <div className="studio">
@@ -2231,10 +2212,9 @@ export default function App() {
                 <div className="panel-scroll">
                   <div className="workspace-tab-content" hidden={leftTab !== "board"}>
                   <Section icon={<Crosshair size={17} />} title="坐标与机器参考">
-                    <Toggle checked={referenceFollowsCanvas} onChange={setReferenceFollowsCanvas} label="坐标系跟随画布旋转" disabled={machineBusy || !!paperWizard} />
                     <Toggle checked={showMachineReference} onChange={setShowMachineReference} label="显示机器虚影" disabled={machineBusy || !!paperWizard} />
-                    <p className="field-note">{referenceFollowsCanvas ? "参考方向与纸张一起旋转。" : "参考方向固定，纸张独立旋转。"}</p>
-                    <details className="reference-details"><summary>关于方向参考</summary><p className="field-note">虚影仅辅助辨认机器方向，不表示实际尺寸、位置或可书写范围。</p></details>
+                    <p className="field-note">机器坐标固定，纸张独立摆放。</p>
+                    <details className="reference-details"><summary>关于方向参考</summary><p className="field-note">定位、预览与书写统一使用背景机器坐标。定位点用于对准真实机器，不改变背景坐标原点。虚影不表示实际尺寸、位置或可书写范围。</p></details>
                   </Section>
                   {paperWizard ? <PaperBackgroundWizard key={`${paperWizard.kind}-${paperWizard.newPage}`} kind={paperWizard.kind} width={paperDraftSize?.width_mm || template.width_mm} height={paperDraftSize?.height_mm || template.height_mm} python={options.python_path} locked={machineBusy || !!busy} calibrated={paperCalibrated} canvasHost={paperCornerHost} onStageChange={setPaperStage} onGuideEditor={setPaperGuideEditor} onPreview={setPaperPreview} onCalibration={beginPaperCalibration} onApply={applyPaperBackground} onCancel={() => void cancelPaperBackground()} onSizeChange={(width_mm, height_mm) => setPaperDraftSize({ width_mm, height_mm })} /> : <Section icon={<Layers3 size={17} />} title="纸张背景">
                     <button className="button" disabled={!editPolicy.canEditDocument} onClick={() => importBackground("pdf")}>导入 PDF 作为背景</button>
@@ -2345,10 +2325,10 @@ export default function App() {
                     </button>
                   </Section></fieldset>
                 <Section icon={<MousePointer2 size={17} />} title="纸面定位">
-                  <RegistrationPanel secondPointVersion={secondPointVersion} onPositioningStarted={() => { setRightOpen(true); setRightTab("machine"); }} onComplete={() => void completeCalibration()} restoreSetup={restoreSetup} onSetupChange={setRegistrationSetup} travelFeed={travelFeed} pointEdit={registrationPointEdit} editLocked={machineBusy || !!busy || inkFontOpen} onPointsChange={setRegistrationPoints} errorVersion={registrationErrorVersion} width={template.width_mm} height={template.height_mm} origin={confirmedOrigin} registration={paperWizard || confirmedOrigin ? registration : scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1)} ready={canJog && !busy} positioning={positioning} calibrationVersion={calibrationVersion} sessionVersion={sessionVersion} preserveScale={!paperWizard && currentLayout.scale_x !== undefined} onLock={setRegistrationLocked} onCommand={async request => { if (!canJog || busy) return false; if (request.type !== "cancel_registration") setPositioning(true); const ok = await command(request); if (!ok) setPositioning(false); return ok; }} />
+                  <RegistrationPanel scene={scene} secondPointVersion={secondPointVersion} onPositioningStarted={() => { setRightOpen(true); setRightTab("machine"); }} onComplete={() => void completeCalibration()} restoreSetup={restoreSetup} onSetupChange={setRegistrationSetup} travelFeed={travelFeed} pointEdit={registrationPointEdit} editLocked={machineBusy || !!busy || inkFontOpen} onPointsChange={setRegistrationPoints} errorVersion={registrationErrorVersion} width={template.width_mm} height={template.height_mm} origin={confirmedOrigin} registration={paperWizard || confirmedOrigin ? registration : scaledRegistration(currentLayout.scale_x ?? 1, currentLayout.scale_y ?? 1)} ready={canJog && !busy} positioning={positioning} calibrationVersion={calibrationVersion} sessionVersion={sessionVersion} preserveScale={!paperWizard && currentLayout.scale_x !== undefined} onLock={setRegistrationLocked} onCommand={async request => { if (!canJog || busy) return false; if (request.type !== "cancel_registration") setPositioning(true); const ok = await command(request); if (!ok) setPositioning(false); return ok; }} />
                   <button className="button full" onClick={() => { setRightOpen(true); setRightTab("machine"); }}>点动微调笔尖 <ChevronRight size={14} /></button>
                   <div className="field-note" aria-label="当前页坐标系">当前页坐标系：{currentLayout.name} · {sharedPages.length} 页共用 · {currentLayout.width_mm.toFixed(1)} × {currentLayout.height_mm.toFixed(1)} mm</div>
-                  <p className="field-note">换纸后，将笔尖对准本页相同的工作原点，点击“将当前位置设为工作原点”即可继续。重连后须重新校准。</p>
+                  <p className="field-note">换纸、改变摆放或重连后，请重新对准定位点并完成校准。</p>
                 </Section>
                   </div>
                   <div className="workspace-tab-content" hidden={leftTab !== "materials"}>
@@ -2873,9 +2853,9 @@ export default function App() {
             <section className="canvas-panel">
               <div className="canvas-toolbar">
                 <div className="canvas-edit-tools" role="group" aria-label="画布编辑工具">
-                  <button className={`icon-button canvas-tool ${canvasTool === "select" && !placingOrigin ? "selected" : ""}`} aria-label="选择" aria-pressed={canvasTool === "select" && !placingOrigin} title="选择：选择或移动笔画" onClick={() => { setPlacingOrigin(false); setCanvasTool("select"); }}><MousePointer2 size={17} /></button>
-                  <button className={`icon-button canvas-tool ${canvasTool === "pan" ? "selected" : ""}`} aria-label="拖动" aria-pressed={canvasTool === "pan"} title="拖动：拖动画布（也可按住空格）" onClick={() => { setPlacingOrigin(false); setCanvasTool("pan"); }}><Hand size={17} /></button>
-                  <button className={`icon-button canvas-tool ${placingOrigin ? "selected" : ""}`} aria-label="设置工作原点" aria-pressed={placingOrigin} disabled={!canJog || !!busy || registrationLocked || inkFontOpen || !!paperWizard || (!confirmedOrigin && (currentLayout.scale_x !== undefined))} title="设置工作原点：已定位时点目标位置；未定位时点笔尖当前位置。自动抬笔并立即设置，无需确认" onClick={() => { setCanvasTool("select"); setPlacingOrigin(value => !value); }}><Crosshair size={17} /></button>
+                  <button className={`icon-button canvas-tool ${canvasTool === "select" && !selectingAlignmentPoint ? "selected" : ""}`} aria-label="选择" aria-pressed={canvasTool === "select" && !selectingAlignmentPoint} title="选择：选择或移动笔画" onClick={() => { setSelectingAlignmentPoint(false); setCanvasTool("select"); }}><MousePointer2 size={17} /></button>
+                  <button className={`icon-button canvas-tool ${canvasTool === "pan" ? "selected" : ""}`} aria-label="拖动" aria-pressed={canvasTool === "pan"} title="拖动：拖动画布（也可按住空格）" onClick={() => { setSelectingAlignmentPoint(false); setCanvasTool("pan"); }}><Hand size={17} /></button>
+                  <button className={`icon-button canvas-tool ${selectingAlignmentPoint ? "selected" : ""}`} aria-label="设置定位点1" aria-pressed={selectingAlignmentPoint} disabled={machineBusy || !!busy || registrationLocked || inkFontOpen || !!paperWizard} title="设置定位点1：在纸张上选择定位点1，然后在纸面定位中对准并确认" onClick={() => { setCanvasTool("select"); setSelectingAlignmentPoint(value => !value); }}><Crosshair size={17} /></button>
                   <span className="tool-divider" />
                   {activeEditor.toolbar}
                 </div>
@@ -2919,7 +2899,7 @@ export default function App() {
                       !document || machineBusy || !!busy || inkFontOpen
                     }
                     onClick={fitToPage}
-                    title="按墨迹范围适配页面内区与 A4 工作范围（X210 / Y297 mm）"
+                    title="按墨迹范围适配当前页面，不限制机器运动范围"
                   >
                     适配画布
                   </button>
@@ -2946,8 +2926,8 @@ export default function App() {
               <div className="paper-host" ref={paperHost}>
                 <div className="paper-corner-host" ref={setPaperCornerHost} hidden={!paperWizard || paperStage !== 1} />
                 <div hidden={!!paperWizard && paperStage === 1} className={`paper-scroll ${pan.panActive ? "pan-ready" : ""} ${pan.panning ? "panning" : ""}`} tabIndex={0} aria-label="画布视图区" {...pan.bind}>
-                  <CanvasPointerOverlay width={template.width_mm} height={template.height_mm} paperWidth={viewSize.width} paperHeight={viewSize.height} origin={coordinateOrigin} registration={registration} host={paperHost.current} onPlaceOrigin={placingOrigin ? setWorkOrigin : undefined}>
-                  <MachineReference angle={viewRotation} follow={referenceFollowsCanvas} ghost={showMachineReference} paperWidth={paperWidth} paperHeight={paperHeight} />
+                  <CanvasPointerOverlay toMachinePoint={scene.point} width={template.width_mm} height={template.height_mm} paperWidth={viewSize.width} paperHeight={viewSize.height} origin={coordinateOrigin} registration={registration} host={paperHost.current} onSelectAlignmentPoint={selectingAlignmentPoint ? selectAlignmentPoint : undefined}>
+                  <MachineReference angle={viewRotation} ghost={showMachineReference} paperWidth={paperWidth} paperHeight={paperHeight} />
                   <div
                     className="paper"
                     style={{ width: paperWidth, height: paperHeight, position: "absolute", left: (viewSize.width - paperWidth) / 2, top: (viewSize.height - paperHeight) / 2, transform: `rotate(${viewRotation}deg)` }}
@@ -3015,7 +2995,6 @@ export default function App() {
                         </g>)}
                         {!inkFontOpen && visibleRoute && <RouteOverlay snapshot={visibleRoute} selectedIndex={routeInspection?.index} />}
                         <CanvasCoordinates
-                          draftPen={penDraft}
                           first={visibleRoute?.document.strokes.find((s) => s.length > 1)?.[0] || coordinateFirst}
                           origin={coordinateOrigin}
                           registration={registration}
@@ -3074,14 +3053,14 @@ export default function App() {
                         </span>
                         {originOutside ? (
                           <span className="origin-outside-note">
-                            工作原点在纸面{originOutside} · 画布(
-                            {coordinateMapping.origin.x.toFixed(2)},{" "}
-                            {coordinateMapping.origin.y.toFixed(2)}) mm
+                            定位点在纸面{originOutside} · 软件机器(
+                            {scene.point(coordinateMapping.origin).x.toFixed(2)},{" "}
+                            {scene.point(coordinateMapping.origin).y.toFixed(2)}) mm
                           </span>
                         ) : (
                           <span>
                             <i className="coordinate-dot origin" />
-                            工作原点 (0,0)
+                            定位点1
                           </span>
                         )}
                       </>
@@ -3101,13 +3080,13 @@ export default function App() {
               </div>
               <div className="canvas-bottom">
                 {activeEditor.historyToolbar}
-                <div className="view-rotation" role="group" aria-label="画布旋转（不改变书写方向）">
+                <div className="view-rotation" role="group" aria-label="纸张摆放方向">
                   <span>画布</span>
-                  <button className="icon-button" title="画布逆时针旋转 90°" aria-label="画布逆时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value - 90) % 360)}><RotateCcw size={15} /></button>
-                  <DraftNumberInput aria-label="画布旋转角度" title="仅旋转画布显示，不改变书写方向" type="number" value={viewRotation} disabled={machineBusy || !!paperWizard} step={1} onChange={event => setViewRotation(Number(event.target.value) % 360)} />
+                  <button className="icon-button" title="画布逆时针旋转 90°" aria-label="画布逆时针旋转 90°" disabled={machineBusy || !!busy || registrationLocked || !!paperWizard} onClick={() => void changePaperAngle(viewRotation - 90)}><RotateCcw size={15} /></button>
+                  <DraftNumberInput aria-label="画布旋转角度" title="纸张相对机器的摆放角度；修改后需重新对位" type="number" value={viewRotation} disabled={machineBusy || !!busy || registrationLocked || !!paperWizard} step={1} onChange={event => void changePaperAngle(Number(event.target.value))} />
                   <span>°</span>
-                  <button className="icon-button" title="画布顺时针旋转 90°" aria-label="画布顺时针旋转 90°" disabled={machineBusy || !!paperWizard} onClick={() => setViewRotation(value => (value + 90) % 360)}><RotateCw size={15} /></button>
-                  <button className="button small" disabled={viewRotation === 0 || machineBusy || !!paperWizard} onClick={() => setViewRotation(0)}>复位画布</button>
+                  <button className="icon-button" title="画布顺时针旋转 90°" aria-label="画布顺时针旋转 90°" disabled={machineBusy || !!busy || registrationLocked || !!paperWizard} onClick={() => void changePaperAngle(viewRotation + 90)}><RotateCw size={15} /></button>
+                  <button className="button small" disabled={viewRotation === 0 || machineBusy || !!busy || registrationLocked || !!paperWizard} onClick={() => void changePaperAngle(0)}>复位画布</button>
                 </div>
                 <div className="page-view-controls" role="group" aria-label="页面与视图">
               <PageNavigation page={canvasPage} count={canvasPageCount} width={template.width_mm} height={template.height_mm} disabled={!editPolicy.canEditDocument || !!paperWizard} onPage={switchCanvasPage} onAdd={addPage} />
@@ -3383,31 +3362,23 @@ export default function App() {
                     </button>
                   </div>
                 </Section>
-                <Section icon={<Settings2 size={17} />} title="工作原点">
-                  <div className="manual-origin">
-                    <button className="button full" disabled={!canJog || !!busy || registrationLocked || !confirmedOrigin} title="自动抬笔，将当前笔尖所在位置设为工作原点，不移动 XY" onClick={() => void issuePositioning({ type: "confirm_manual_origin", raised_confirmed: true })}>将当前位置设为工作原点</button>
-                    <button className="button full" disabled={!canJog || !!busy || registrationLocked || (!confirmedOrigin && (currentLayout.scale_x !== undefined))} title="自动抬笔，将画布左上角设为工作原点，原缩放与旋转失效" onClick={() => { resetOriginLayout.current = currentLayout.id; void issuePositioning({ type: "reset_origin" }).then(ok => { if (!ok) resetOriginLayout.current = null; }); }}>重置到画布左上角</button>
-                  </div>
-                  <p className="field-note" role="status">工作原点{confirmedOrigin ? "" : projectCalibration && projectNeedsAlignment ? "（工程保存，待两点校准）" : "（默认定位点1）"}：画布 X {displayedOrigin[0].toFixed(2)} / Y {displayedOrigin[1].toFixed(2)} mm</p>
-                  <p className="field-note">当前笔尖：{projectNeedsAlignment && projectCalibration ? "待两点校准" : `画布 X ${displayedPen[0].toFixed(2)} / Y ${displayedPen[1].toFixed(2)} mm${coordinateMapping?.pen ? "" : "（默认末点）"}`}</p>
-                  <p className="field-note">两个按钮都会先抬笔，点击后立即执行，不再弹出二次确认。</p>
-                </Section>
                 <Section icon={<MousePointer2 size={17} />} title="机器移动">
                   <details className="position-details">
                     <summary>指定位置与电动返回</summary>
+                    <button className="button full" disabled={!canJog || !!busy || registrationLocked || !!paperWizard} title="先将笔尖对准定位点1；点击后自动抬笔并确认对位，不移动 XY" onClick={() => void alignTipToFirstPoint()}>将笔尖设定在定位点1</button>
                   <fieldset
                     className="calibration-controls"
                     disabled={machineBusy || !!busy || registrationLocked || !confirmedOrigin}
                   >
                     <div className="calibration-grid">
                       <CanvasNumber
-                        label="目标画布 X"
+                        label="软件机器 X"
                         ariaLabel="目标画布X"
                         value={targetCanvasX}
                         onChange={setTargetCanvasX}
                       />
                       <CanvasNumber
-                        label="目标画布 Y"
+                        label="软件机器 Y"
                         ariaLabel="目标画布Y"
                         value={targetCanvasY}
                         onChange={setTargetCanvasY}
@@ -3419,8 +3390,8 @@ export default function App() {
                       onClick={() =>
                         issuePositioning({
                           type: "move_to",
-                          canvas_x: targetCanvasX,
-                          canvas_y: targetCanvasY,
+                          canvas_x: scene.inverse({ x: targetCanvasX, y: targetCanvasY }).x,
+                          canvas_y: scene.inverse({ x: targetCanvasX, y: targetCanvasY }).y,
                           feed: travelFeed,
                         })
                       }
@@ -3434,10 +3405,10 @@ export default function App() {
                         issuePositioning({ type: "return_origin" })
                       }
                     >
-                      电动返回工作原点 XY0
+                      返回定位点1
                     </button>
                     <p className="field-note">
-                      先抬笔，再移动到指定点或已校准 XY0；不执行 $H。
+                      先抬笔，再移动到软件机器坐标的指定位置或已确认的定位点1。
                     </p>
                   </fieldset>
                   </details>
@@ -4251,7 +4222,7 @@ export default function App() {
                     <h3>3. 连接并书写</h3>
                     <p>
                       扫描并选择串口，等待
-                      Idle。开始时自动抬笔；两点或三点纸面校准会自动建立工作原点并保留抬笔状态。停止会终止旧任务并保留连接；恢复连接会清除旧任务并抬笔。
+                      Idle。开始时自动抬笔；两点或三点纸面校准会自动建立定位点并保留抬笔状态。停止会终止旧任务并保留连接；恢复连接会清除旧任务并抬笔。
                     </p>
                     <div className="settings-note">
                       浏览器模式仅预览界面。文件转换和机器操作请在 Tauri

@@ -6,6 +6,8 @@ const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const geometry = {};
 new Function("exports", ts.transpileModule(readFileSync(new URL("./coordinateGeometry.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText)(geometry);
+const scene = {};
+new Function("require", "exports", ts.transpileModule(readFileSync(new URL("./machineScene.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText)(() => geometry, scene);
 
 function harness(overrides = {}) {
   const slots = [], effects = [], commands = [], locks = [], saved = [];
@@ -18,7 +20,7 @@ function harness(overrides = {}) {
   const jsx = (type, props) => ({ type, props });
   const exports = {};
   const code = ts.transpileModule(readFileSync(new URL("./RegistrationPanel.tsx", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  new Function("require", "exports", code)(name => name === "react" ? hook : name === "./coordinateGeometry" ? geometry : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "fragment" } : { DraftNumberInput: "draft-number" }, exports);
+  new Function("require", "exports", code)(name => name === "react" ? hook : name === "./coordinateGeometry" ? geometry : name === "./machineScene" ? scene : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "fragment" } : { DraftNumberInput: "draft-number" }, exports);
   const props = { travelFeed: 2300, width: 210, height: 297, origin: null, registration: { scale: 1, rotation_deg: 0 }, profiles: [], ready: true, positioning: false, calibrationVersion: 0, sessionVersion: 0, onCommand: async command => { commands.push(command); return true; }, onLock: value => locks.push(value), onSave: async p => saved.push(p), ...overrides };
   function render(patch = {}) { Object.assign(props, patch); let count = 0; do { dirty = false; cursor = 0; tree = exports.RegistrationPanel(props); effects.splice(0).forEach(f => f()); assert.ok(++count < 20, "render settles"); } while (dirty); return tree; }
   function nodes(node) { if (!node || typeof node !== "object") return []; if (Array.isArray(node)) return node.flatMap(nodes); return [node, ...nodes(node.props?.children)]; }

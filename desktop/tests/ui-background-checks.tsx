@@ -47,14 +47,12 @@ export async function backgroundChecks(){
   assert.deepEqual(exported.strokes,[[{x:25,y:10},{x:35,y:20}]]);assert.equal(JSON.stringify(exported).includes('data:image'),false,'Background raster must never enter exported drawing');
   assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.trim()==='新建四角定位页'),false);
   assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.trim()==='当前笔尖设为画布右上角'),false);
-  assert.ok(button('重置到画布左上角'));
+  assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.trim()==='重置到画布左上角'),false);
   events.push({type:'connected',port:'MOCK'},{type:'status',status:{state:'Idle',position:[0,0,0],wco:[0,0,0]}});
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,230));});
   await click('设备控制');
   const before=requests.filter(r=>r.name==='device_command').length;
-  await click('重置到画布左上角');
-  assert.equal(requests.filter(r=>r.name==='device_command').length,before+1,'Origin setting must execute immediately without confirmation');
-  assert.deepEqual(requests.filter(r=>r.name==='device_command').at(-1)!.args.command,{type:'reset_origin'});
-  console.log('PASS: PDF background A4, non-selectable raster, independent page ink preservation and ink-only export; origin reset executes without confirmation.');
+  assert.equal(requests.filter(r=>r.name==='device_command').length,before,'Opening device controls does not redefine coordinates');
+  console.log('PASS: PDF background, independent page ink, ink-only export and no separate work-origin controls.');
  }finally{await act(async()=>root.unmount());}
 }

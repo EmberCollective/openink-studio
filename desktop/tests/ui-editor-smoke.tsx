@@ -4,6 +4,7 @@ import {run as fontPreviewChecks} from "./ui-font-preview-checks";
 import {run as textLayoutChecks} from "./ui-text-layout-checks";
 import {projectLifecycleChecks} from "./ui-project-lifecycle-checks";
 import {registrationChecks} from "./ui-registration-checks";
+export {registrationChecks} from "./ui-registration-checks";
 import {projectChecks} from "./ui-project-checks";
 import {clipboardChecks} from "./ui-clipboard-checks";
 import {paperChecks} from './ui-paper-checks';
@@ -92,7 +93,7 @@ export async function appIntegration(){
  const referenceTransform=()=>document.querySelector('[data-reference="direction"]')!.getAttribute('transform')!.replace(/^translate\([^)]*\) /,'');
  const referenceShapes=shapes();
  const referenceCommands=requests.filter(r=>r.name==='device_command').length;
- assert.equal(findButton('坐标系跟随画布旋转').getAttribute('aria-pressed'),'false');
+ assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.trim()==='坐标系跟随画布旋转'),false);
  assert.equal(findButton('显示机器虚影').getAttribute('aria-pressed'),'true');
  const fitViewport=document.querySelector('.paper-scroll') as HTMLElement;
  Object.defineProperties(fitViewport,{clientWidth:{value:1200,configurable:true},clientHeight:{value:800,configurable:true}});
@@ -108,15 +109,15 @@ export async function appIntegration(){
  await click('画布顺时针旋转 90°');
  assert.equal(referenceTransform(),fixedReference,'Reference origin and axes stay fixed');
  assert.equal((document.querySelector('.paper') as HTMLElement).style.transform,'rotate(90deg)');
- await click('坐标系跟随画布旋转');assert.match(referenceTransform()!,/rotate\(90\)/);
  await click('显示机器虚影');assert.equal(document.querySelector('[data-reference="ghost"]'),null);
  assert.ok(document.querySelector('.machine-reference text'),'Hiding ghost keeps axes');
- await number('画布旋转角度',37);assert.match(referenceTransform()!,/rotate\(37\)/);
- await click('坐标系跟随画布旋转');assert.equal(referenceTransform(),fixedReference);
+ await number('画布旋转角度',37);assert.equal(referenceTransform(),fixedReference);
  await click('显示机器虚影');await click('复位画布');
  assert.equal(findButton('复位画布').disabled,true);
  assert.deepEqual(shapes(),referenceShapes,'Display rotation never edits writing paths');
- assert.equal(requests.filter(r=>r.name==='device_command').length,referenceCommands,'Reference controls send no device commands');
+ assert.deepEqual(requests.filter(r=>r.name==='device_command').slice(referenceCommands).map(r=>r.args.command.type),['forget_calibration','forget_calibration','forget_calibration'],'Paper angle changes invalidate calibration without motion');
+ assert.equal(findButton('开始书写').disabled,true,'Changing placement requires alignment');
+ events.push({type:'origin_mode', automatic:true});await poll();
  await act(async()=>materialTab.click());assert.equal(footerInsert.hidden,false,'Returning to materials restores the insertion action');assert.equal(document.querySelector('.left-panel textarea'),preservedInput,'Tab switches retain the same input instance');assert.equal(preservedInput?.value,preservedValue);
  const leftToggle=materialTab;
  const rightToggle=()=>(document.querySelector('button[aria-label="规划与机器侧栏"]') as HTMLButtonElement).click();
@@ -158,7 +159,6 @@ export async function appIntegration(){
  assert.deepEqual(sent.strokes,exported.strokes,'Queued mock Job must match exported edited geometry');
  const plannedBeforeMotion=requests.filter(r=>r.name==='optimize_document').length;
  events.push({type:'timing',total_seconds:120,cumulative_seconds:[20,120]},{type:'job_started'},{type:'progress',sent:2,total:2},{type:'status',status:{state:'Run',position:[3,-4,0],wco:[0,0,0]}});await poll();
- assert.equal(findButton('坐标系跟随画布旋转').disabled,true);
  assert.equal(findButton('显示机器虚影').disabled,true);
  assert.equal(findButton('画布顺时针旋转 90°').disabled,true);
  assert.ok(document.querySelector('[aria-label="任务时间估算"]')?.textContent?.includes('预计总耗时'));assert.ok(document.querySelector('[aria-label="任务时间估算"]')?.textContent?.includes('等待设备完成'),'All ACKed commands still wait for physical device completion');
@@ -229,12 +229,12 @@ async function recoveryAndCoordinates(){
  assert.equal(marker('origin'),null,'Unknown controller position must not invent an origin');assert.equal(marker('pen'),null,'Unknown controller position must not invent a pen location');
  assert.ok(document.querySelector('.coordinate-unknown')?.textContent,'Uncalibrated controller must present a visible explanation');
  events.push({type:'ports',ports:[{name:'MOCK',description:'Offline mock controller',preferred:true}]},{type:'connected',port:'MOCK'},{type:'status',status:{state:'Idle',position:[5,-6,0],wco:[0,0,0]}});await poll();
- assert.equal(findButton('开始书写').disabled,false);assert.equal(findButton('移动到指定点').disabled,true);assert.equal(findButton('电动返回工作原点 XY0').disabled,true);
+ assert.equal(findButton('开始书写').disabled,false);assert.equal(findButton('移动到指定点').disabled,true);assert.equal(findButton('返回定位点1').disabled,true);
  assert.equal(marker('origin'),null,'Known telemetry must not auto-calibrate the paper origin');
  const jogRight=document.querySelector('button.jog.right') as HTMLButtonElement;assert.equal(jogRight.disabled,false,'Uncalibrated manual jogging must remain available');
 
- for(const label of ['选择','拖动','设置工作原点']) { const tool=document.querySelector(`button[aria-label="${label}"]`);assert.ok(tool?.querySelector('svg'),`${label} must be one SVG icon`);assert.equal(tool.textContent?.trim(),'',`${label} must not mix text`);assert.ok(tool.getAttribute('title')?.includes(label),`${label} needs a hover explanation`); }
- assert.ok(findButton('将当前位置设为工作原点'));assert.ok(findButton('重置到画布左上角'));assert.equal(document.body.textContent?.includes('确认重置为当前笔尖位置'),false);
+ for(const label of ['选择','拖动','设置定位点1']) { const tool=document.querySelector(`button[aria-label="${label}"]`);assert.ok(tool?.querySelector('svg'),`${label} must be one SVG icon`);assert.equal(tool.textContent?.trim(),'',`${label} must not mix text`);assert.ok(tool.getAttribute('title')?.includes(label),`${label} needs a hover explanation`); }
+ assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.includes('设为工作原点')),false);
  events.push({type:'status',status:{state:'Idle',position:[5,-6,0],wco:[0,0,0]}},{type:'origin_mode',automatic:false},{type:'calibration_changed',origin:[5,14]},{type:'positioning',active:false});await poll();
  assertMarker('start',10,10);assertMarker('origin',5,14);assertMarker('pen',10,20);
  await number('移动速度',12000);
@@ -247,18 +247,18 @@ async function recoveryAndCoordinates(){
  assert.equal(move.feed,12000,'Explicit canvas move must preserve selected travel feed without a hidden cap');
  events.push({type:'positioning',active:true});await poll();assert.equal(findButton('开始书写').disabled,true);assert.equal(findButton('停止').disabled,false,'Stop must remain available while an explicit position move is busy');assert.equal(document.querySelector('.canvas-edit-layer.active'),null);
  await click('停止');events.push({type:'stopped'},{type:'positioning',active:false},{type:'status',status:{state:'Idle',position:[7,-9,0],wco:[0,0,0]}});await poll();assertMarker('origin',5,14);
- await click('电动返回工作原点 XY0');assert.equal(requests.filter(r=>r.name==='device_command'&&r.args.command.type==='return_origin').length,1);
+ await click('返回定位点1');assert.equal(requests.filter(r=>r.name==='device_command'&&r.args.command.type==='return_origin').length,1);
  events.push({type:'positioning',active:true},{type:'error',message:'mock positioning refused; no arrival confirmed'},{type:'positioning',active:false});await poll();assert.ok(document.querySelector('.status-message')?.textContent?.includes('mock positioning refused; no arrival confirmed'),'A failed positioning operation must not invent an arrival success');
  await click('开始书写');events.push({type:'job_started',anchor:[99,-88,0]},{type:'status',status:{state:'Run',position:[9,-10,0],wco:[0,0,0]}});await poll();assertMarker('origin',5,14);assertMarker('pen',14,24);
  await click('停止');events.push({type:'stopped'},{type:'status',status:{state:'Idle',position:[9,-10,0],wco:[2,3,0]}});await poll();
  assert.ok(document.querySelector('.connection-badge')?.textContent?.includes('MOCK 已连接'),'Stopped must preserve a live connection');
- assert.ok(document.querySelector('.coordinate-overlay')?.textContent?.includes('工作原点'),'Nonzero WCO must retain an explicitly work-coordinate origin label');
+ assert.ok(document.querySelector('.coordinate-overlay')?.textContent?.includes('定位点1'),'Nonzero WCO must retain an explicitly work-coordinate origin label');
  assert.ok(!document.querySelector('.coordinate-overlay')?.textContent?.includes('机器原点'),'Work coordinates must not be labelled machine-origin MPos');
  assertMarker('origin',5,14);assertMarker('pen',14,24);
  events.push({type:'origin_mode',automatic:false},{type:'calibration_changed',origin:[-20,4]});await poll();assertMarker('origin',-20,4);
  assert.equal(marker('origin')?.getAttribute('data-outside'),'true');assert.ok(document.querySelector('.origin-outside-note')?.textContent?.includes('左侧'),'Out-of-page origin must show its actual direction');assert.ok(document.querySelector('.origin-outside-note')?.textContent?.includes('(-20.00, 4.00)'),'Out-of-page origin must show its actual canvas coordinates');
  events.push({type:'disconnected'});await poll();
- assert.equal(marker('origin'),null,'Disconnect must invalidate confirmed paper calibration');assert.equal(findButton('移动到指定点').disabled,true);assert.equal(findButton('电动返回工作原点 XY0').disabled,true);
+ assert.equal(marker('origin'),null,'Disconnect must invalidate confirmed paper calibration');assert.equal(findButton('移动到指定点').disabled,true);assert.equal(findButton('返回定位点1').disabled,true);
  assert.ok(![...document.querySelectorAll('button')].some(b=>b.textContent?.trim()==='清除旧任务并恢复连接'),'Ordinary offline state should not present failure recovery');
  await click('连接设备');events.push({type:'error',message:'mock connection failed'},{type:'disconnected'});await poll();
  await click('清除旧任务并恢复连接');assert.equal(requests.filter(r=>r.name==='device_command'&&r.args.command.type==='recover').length,1,'Recovery must use the explicit recover command after failed connection');
@@ -296,7 +296,7 @@ async function numericDraftChecks(){
  await act(async()=>{protectedInput.focus();Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')!.set!.call(protectedInput,'99');protectedInput.dispatchEvent(new Event('input',{bubbles:true}));});
  await act(async()=>setLock(true));await act(async()=>setLock(false));await act(async()=>protectedInput.blur());assert.equal(protectedValue,12,'A draft present before job lock must be discarded, never committed after unlock');await act(async()=>protectedRoot.unmount());
 }
-async function fitTravelChecks(){
+async function fitPageChecks(){
  const events:any[]=[];const requests:{name:string;args:any}[]=[];
  (globalThis as any).__openMock=async()=>'/offline/tall-page.pdf';
  (globalThis as any).__invokeMock=async(name:string,args:any)=>{
@@ -310,18 +310,19 @@ async function fitTravelChecks(){
  };
  const root=createRoot(document.getElementById('root')!);await act(async()=>root.render(<App/>));await click('导入素材…');
  events.push({type:'connected',port:'MOCK'},{type:'status',status:{state:'Idle',position:[0,0,0],wco:[0,0,0]}},{type:'origin_mode',automatic:false},{type:'calibration_changed',origin:[0,0]});await poll();
- assert.equal(findButton('开始书写').disabled,true,'Tall imported PDF must initially exceed the travel envelope');
- await click('适配画布');assert.equal(findButton('开始书写').disabled,false,'Fit must produce a runnable placement within fixed-origin travel');
+ assert.equal(findButton('开始书写').disabled,false,'Paper bounds must not impose a machine travel limit');
+ await click('适配画布');assert.equal(findButton('开始书写').disabled,false,'Optional fit preserves runnable geometry');
  await click('导出 SVG');const fitted=requests.filter(r=>r.name==='export_document').at(-1)!.args.document;
  const points=fitted.strokes.flat();const ys=points.map((p:any)=>p.y);
- assert.ok(Math.min(...ys)>=0);assert.ok(Math.max(...ys)<=240,'Fit must use the whole current page within the A4 axis range');
+ assert.ok(Math.min(...ys)>=0);assert.ok(Math.max(...ys)<=240,'Fit uses the chosen page bounds');
  await click('全选路径 Ctrl+A');await number('选区Y',190);
- assert.equal(findButton('开始书写').disabled,true,'Moving fitted geometry out of reachable area must be blocked before IPC');
- await click('开始书写');assert.equal(requests.filter(r=>r.name==='device_command'&&r.args.command.type==='run').length,0);
- await click('适配画布');assert.equal(findButton('开始书写').disabled,false);
+ assert.equal(findButton('开始书写').disabled,false,'Finite placement outside the page remains runnable');
+ assert.equal(requests.filter(r=>r.name==='device_command'&&r.args.command.type==='run').length,0,'Editing never starts motion');
  events.push({type:'status',status:{state:'Idle',position:[0,190,0],wco:[0,0,0]}});await poll();
- assert.equal(findButton('开始书写').disabled,true,'Current-tip travel must also limit reachable placement');
- await act(async()=>root.unmount());console.log('PASS: tall PDF fit uses the whole canvas and fixed-origin endpoint limits; edited placement/current-tip travel blocked before dispatch.');
+ assert.equal(findButton('开始书写').disabled,false,'Current tip does not impose an A4 travel limit');
+ await click('开始书写');const runs=requests.filter(r=>r.name==='device_command'&&r.args.command.type==='run');
+ assert.equal(runs.length,1);assert.ok(runs[0].args.command.job.document.strokes.flat().every((p:any)=>p.y>=190),'Explicit Run retains the chosen off-page placement');
+ await act(async()=>root.unmount());console.log('PASS: optional PDF fit uses page bounds; finite off-page placement and current-tip travel are not clipped to A4; only explicit Run dispatches.');
 }
 async function submissionLockChecks(){
  const events:any[]=[];const requests:{name:string;args:any}[]=[];let resolveRun:()=>void=()=>{};
@@ -425,7 +426,6 @@ async function materialCompositionChecks(){
   if(name==='poll_device')return [];
   if(name==='import_document')return {...copy(fixture),name:`Material ${opened}`};
   if(name==='pdf_page_count')return 1;
-  if(name==='save_glyph')return {path:'/offline/glyph.json',name:'Test',characters:['永']};
   if(name==='default_import_options')return {};
   if(['list_fonts','list_legacy_fonts','list_glyph_fonts','list_templates','list_registration_profiles'].includes(name))return [];
   if(name==='optimize_document')return {document:{...args.document,strokes:[...args.document.strokes].reverse()},stroke_order:args.document.strokes.map((_:unknown,i:number)=>args.document.strokes.length-1-i),before_distance_mm:100,after_distance_mm:20,before_travel_seconds:4,after_travel_seconds:0.8};
@@ -443,14 +443,7 @@ async function materialCompositionChecks(){
  await click('删除素材 Material 1');assert.equal(paths().length,2,'Deleting material after optimization must follow ownership permutation');assert.equal(document.querySelectorAll('.material-item').length,1);
  await click('撤销 Ctrl+Z');assert.equal(paths().length,4);assert.equal(document.querySelectorAll('.material-item').length,2,'Undo restores material identity');
  assert.ok(!document.querySelector('.material-list')?.textContent?.includes('100.0 → 20.0'),'Any edit/undo must invalidate optimization stats');
- const extraction=document.querySelector('details.glyph-extraction') as HTMLDetailsElement;
- await act(async()=>{extraction.open=true;extraction.dispatchEvent(new Event('toggle'));});
- assert.equal(paths().length,2,'Extraction view must contain only the most recent PDF, not all composed materials');
- const character=[...document.querySelectorAll('label.field')].find(l=>l.textContent?.includes('绑定字符'))!.querySelector('input')!;
- await act(async()=>{Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value')!.set!.call(character,'永');character.dispatchEvent(new Event('input',{bubbles:true}));});
- await click('保存这个字形');const saved=requests.filter(r=>r.name==='save_glyph').at(-1)!.args;
- assert.deepEqual(saved.document.strokes,fixture.strokes,'Glyph save must use raw imported PDF coordinates without unrelated materials');
- await act(async()=>{extraction.open=false;extraction.dispatchEvent(new Event('toggle'));});assert.equal(paths().length,4,'Closing extraction restores composition');
+ assert.equal(document.querySelector('details.glyph-extraction'),null,'Retired glyph extraction controls stay removed');
  await act(async()=>root.unmount());console.log('PASS: multiple materials append without losing edits; insert/delete/optimization ownership and undo; mocked IPC only.');
 }
 export async function run(){
@@ -487,7 +480,7 @@ export async function run(){
  await sourceParity('pdf');await sourceParity('gfont');
  await materialCompositionChecks();
  await recoveryAndCoordinates();
- await fitTravelChecks();
+ await fitPageChecks();
  await submissionLockChecks();
  await pendingRouteStopChecks();
  await routeComparisonChecks();

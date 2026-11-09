@@ -77,7 +77,7 @@ pub enum DeviceCommand {
         canvas_y: f64,
         feed: f64,
     },
-    BeginRegistration { canvas_x: f64, canvas_y: f64, preserve_scale: Option<[f64; 2]> },
+    BeginRegistration { canvas_x: f64, canvas_y: f64, preserve_scale: Option<[f64; 2]>, mapping: Option<[f64; 4]> },
     FinishRegistration { canvas_x: f64, canvas_y: f64 },
     CaptureRegistrationSecond { canvas_x: f64, canvas_y: f64 },
     FinishRegistrationThird { canvas_x: f64, canvas_y: f64 },
@@ -86,7 +86,7 @@ pub enum DeviceCommand {
     ReturnOrigin,
     ConfirmManualOrigin { raised_confirmed: bool },
     ForgetCalibration(Sender<Result<(), String>>),
-    SetRegistrationScale { scales: [f64; 2], reply: Sender<Result<(), String>> },
+    SetRegistrationScale { scales: [f64; 2], mapping: Option<[f64; 4]>, reply: Sender<Result<(), String>> },
     ResetOrigin,
     AlignTopRight {
         width_mm: f64,
@@ -333,22 +333,15 @@ pub fn build_job(job: &Job, anchor: [f64; 3]) -> Result<Vec<String>, String> {
         .filter(|s| s.len() >= 2)
         .collect();
     let first = strokes.first().ok_or("No drawable strokes")?[0];
-    let mut min = [f64::INFINITY; 2];
-    let mut max = [f64::NEG_INFINITY; 2];
     for s in &strokes {
         for p in s.iter() {
             let d = [p.x - first.x, first.y - p.y];
             for a in 0..2 {
-                if !d[a].is_finite() || d[a].abs() > positioning::AXIS_LIMITS_MM[a] {
-                    return Err("Current-point offset exceeds A4 limits (X 210 mm, Y 297 mm)".into());
+                if !d[a].is_finite() || !(d[a] as f32).is_finite() || !((anchor[a] + d[a]) as f32).is_finite() {
+                    return Err("Job coordinates must be finite and controller-representable".into());
                 }
-                min[a] = min[a].min(d[a]);
-                max[a] = max[a].max(d[a]);
             }
         }
-    }
-    if (0..2).any(|a| max[a] - min[a] > positioning::AXIS_LIMITS_MM[a]) {
-        return Err("Job span exceeds A4 limits (X 210 mm, Y 297 mm)".into());
     }
     let up = format!("G1 G90 Z0.000 F{}", job.z_feed);
     let mut lines = vec!["G21".into(), "G90".into(), "G94".into(), up.clone()];
@@ -498,6 +491,7 @@ enum PositioningOperation {
     Move {
         target: [f64; 2],
         feed: f64,
+        distance: f64,
         phase: MovePhase,
         started: Instant,
     },
@@ -1427,7 +1421,7 @@ fn worker_loop(
                         let _ = reply.send(Ok(()));
                     }
                 }
-                DeviceCommand::SetRegistrationScale { scales: [sx, sy], reply } => {
+                DeviceCommand::SetRegistrationScale { scales: [sx, sy], mapping, reply } => {
                     let next = (|| {
                         let confirmed = calibration.as_ref().ok_or("Calibrate the current session before applying page scales")?;
                         if link.is_none() || running || paused || pending.is_some() || !queue.is_empty()
@@ -1437,6 +1431,9 @@ fn worker_loop(
                         }
                         if ![sx, sy].iter().all(|v| v.is_finite() && (0.1..=10.).contains(v)) {
                             return Err("Page scales must be finite and within 0.1..10".into());
+                        }
+                        if let Some(matrix) = mapping {
+                            return Registration { scale: (sx + sy) / 2., rotation_deg: matrix[2].atan2(matrix[0]).to_degrees(), matrix: Some(matrix) }.validate();
                         }
                         let angle = confirmed.registration.rotation_deg;
                         let (sin, cos) = angle.to_radians().sin_cos();
@@ -1565,9 +1562,9 @@ fn worker_loop(
                         let p = status.position.unwrap();
                         let target = [p[0] + x, p[1] + y];
                         if !positioning::offsets_match(status.wco, confirmed)
-                            || (0..2).any(|axis| target[axis].abs() > positioning::AXIS_LIMITS_MM[axis])
+                            || positioning::check_travel(p, target).is_err()
                         {
-                            emit(DeviceEvent::Error("Jog target or coordinate offset differs from the calibrated A4 envelope (X 210 mm, Y 297 mm)".into()));
+                            emit(DeviceEvent::Error("Jog requires finite coordinates and unchanged calibration offsets".into()));
                         } else {
                             queue.push_back(format!("$J=G91 G21 X{x:.3} Y{y:.3} F{feed}"));
                         }
@@ -1616,6 +1613,7 @@ fn worker_loop(
                     let applying_registration = matches!(c, DeviceCommand::ApplyRegistration { .. });
                     let registration = match &c {
                         DeviceCommand::ApplyRegistration { scale, rotation_deg, matrix, .. } => Registration { scale: *scale, rotation_deg: *rotation_deg, matrix: *matrix },
+                        DeviceCommand::BeginRegistration { mapping: Some(matrix), .. } => Registration { scale: 1., rotation_deg: matrix[2].atan2(matrix[0]).to_degrees(), matrix: Some(*matrix) },
                         DeviceCommand::BeginRegistration { preserve_scale: Some([sx, sy]), .. } => Registration { scale: *sx, rotation_deg: 0., matrix: Some([*sx, 0., 0., *sy]) },
                         _ => Registration::default(),
                     };
@@ -1718,7 +1716,7 @@ fn worker_loop(
                             let (second, measured) = registration_second.ok_or("Confirm the second point before the third")?;
                             Registration::solve_three(confirmed.origin, second, [canvas_x,canvas_y], measured, actual)
                         } else if let Some([a, b, c, d]) = confirmed.registration.matrix {
-                            Registration::solve_preserving_scale(confirmed.origin, Point { x: canvas_x, y: canvas_y }, actual, [a.hypot(c), b.hypot(d)])
+                            Registration::solve_preserving_mapping(confirmed.origin, Point { x: canvas_x, y: canvas_y }, actual, [a,b,c,d])
                         } else {
                             Registration::solve(confirmed.origin, Point { x: canvas_x, y: canvas_y }, actual)
                         }
@@ -1900,6 +1898,7 @@ fn worker_loop(
                             positioning_operation = Some(PositioningOperation::Move {
                                 target,
                                 feed,
+                                distance: (target[0] - status.position.unwrap()[0]).hypot(target[1] - status.position.unwrap()[1]),
                                 phase: MovePhase::Raising,
                                 started: Instant::now(),
                             });
@@ -2027,6 +2026,7 @@ fn worker_loop(
                                         feed,
                                         phase,
                                         started,
+                                        distance,
                                     } if *phase == MovePhase::WaitRaised
                                         && status.state == "Idle"
                                         && !paused =>
@@ -2052,6 +2052,7 @@ fn worker_loop(
                                                     target[0], target[1], feed
                                                 ));
                                                 *phase = MovePhase::Travelling;
+                                                *distance = (target[0] - position[0]).hypot(target[1] - position[1]);
                                                 *started = Instant::now();
                                             }
                                         }
@@ -2263,9 +2264,9 @@ fn worker_loop(
                             started,
                             ..
                         } => started.elapsed() > Duration::from_secs(5),
-                        PositioningOperation::Move { started, feed, .. } => {
+                        PositioningOperation::Move { started, feed, distance, .. } => {
                             started.elapsed()
-                                > Duration::try_from_secs_f64(30. + 60. * positioning::AXIS_LIMITS_MM[0].hypot(positioning::AXIS_LIMITS_MM[1]) / feed)
+                                > Duration::try_from_secs_f64(30. + 60. * distance / feed)
                                     .unwrap_or(Duration::MAX)
                         }
                         _ => false,
@@ -2459,14 +2460,14 @@ mod tests {
     #[test]
     fn invalid_geometry_and_unknown_z_rejected() {
         let mut j = job();
-        j.document.strokes[0][1].x = 216.0;
+        j.document.strokes[0][1].x = f64::INFINITY;
         assert!(build_job(&j, [0.0, 0.0, 0.0]).is_err());
         assert!(build_job(&job(), [0.0, 0.0, 4.0]).is_err());
         j.document.strokes[0][1].x = f64::NAN;
         assert!(build_job(&j, [0.0, 0.0, 0.0]).is_err());
     }
     #[test]
-    fn a4_job_limits_are_axis_specific_and_preserve_span_guard() {
+    fn finite_jobs_are_not_limited_by_a4() {
         let mut j = job();
         j.document.strokes = vec![vec![
             Point { x: 0., y: 0. },
@@ -2474,15 +2475,15 @@ mod tests {
         ]];
         assert!(build_job(&j, [0.; 3]).is_ok());
         j.document.strokes[0][1].y = 297.01;
-        assert!(build_job(&j, [0.; 3]).is_err());
+        assert!(build_job(&j, [0.; 3]).is_ok());
         j.document.strokes[0][1] = Point { x: 210.01, y: 0. };
-        assert!(build_job(&j, [0.; 3]).is_err());
+        assert!(build_job(&j, [0.; 3]).is_ok());
         j.document.strokes[0] = vec![
             Point { x: 0., y: 0. },
             Point { x: -110., y: 0. },
             Point { x: 110., y: 0. },
         ];
-        assert!(build_job(&j, [0.; 3]).unwrap_err().contains("Job span"));
+        assert!(build_job(&j, [0.; 3]).is_ok());
     }
     #[test]
     fn status_preserves_wco_and_reports_mm() {
@@ -3256,15 +3257,15 @@ mod tests {
         );
     }
     #[test]
-    fn oversized_geometry_refuses_before_any_serial_command() {
+    fn nonfinite_geometry_refuses_before_any_serial_command() {
         let mut j = job();
-        j.document.strokes[0][1].x = 216.;
+        j.document.strokes[0][1].x = f64::INFINITY;
         readonly_rejection(
             0.,
             Some([0.; 3]),
             "[GC:G0 G54 G17 G21 G90 G94]",
             j,
-            "X 210 mm",
+            "finite",
         );
     }
     #[test]
@@ -4753,7 +4754,7 @@ mod tests {
             }
         }
         assert!(trace.lock().unwrap().iter().any(|line| line == "> $J=G91 G21 Y1.000 X-2.000 F1200"));
-        tx.send(DeviceCommand::BeginRegistration { canvas_x:20.,canvas_y:30.,preserve_scale:None }).unwrap();
+        tx.send(DeviceCommand::BeginRegistration { canvas_x:20.,canvas_y:30.,preserve_scale:None, mapping: None }).unwrap();
         wait_positioning_done(&rx);
         tx.send(DeviceCommand::MoveTo { canvas_x:120.,canvas_y:30.,feed:1500. }).unwrap();
         assert_eq!(wait_positioning_done(&rx).position, Some([100.,0.,0.]));
@@ -4785,8 +4786,8 @@ mod tests {
         assert_eq!(last, Some([10.,-10.,0.]));
         assert!(trace.lock().unwrap().iter().any(|line| line == "> G1 Y10.000 X-10.000 F1200"));
         let before = trace.lock().unwrap().iter().filter(|line|line.starts_with("> G1")).count();
-        tx.send(DeviceCommand::MoveTo { canvas_x:231.,canvas_y:30.,feed:1500. }).unwrap();
-        loop { if let DeviceEvent::Error(e)=rx.recv_timeout(Duration::from_secs(3)).unwrap() {assert!(e.contains("A4"));break} }
+        tx.send(DeviceCommand::MoveTo { canvas_x:f64::NAN,canvas_y:30.,feed:1500. }).unwrap();
+        loop { if let DeviceEvent::Error(e)=rx.recv_timeout(Duration::from_secs(3)).unwrap() {assert!(e.contains("finite"));break} }
         assert_eq!(trace.lock().unwrap().iter().filter(|line|line.starts_with("> G1")).count(), before);
         // A recovery request cannot silently replace the active session's mapping.
         tx.send(DeviceCommand::Recover {port:"mock".into(),swap_xy:false}).unwrap();
@@ -4796,7 +4797,7 @@ mod tests {
     #[test]
     fn swapped_three_point_registration_preserves_orientation_and_recovery_mapping() {
         let (tx,rx,handle)=position_worker_with_axes(PositionWire::new(),true);
-        tx.send(DeviceCommand::BeginRegistration {canvas_x:20.,canvas_y:30.,preserve_scale:None}).unwrap();
+        tx.send(DeviceCommand::BeginRegistration {canvas_x:20.,canvas_y:30.,preserve_scale:None, mapping: None }).unwrap();
         wait_positioning_done(&rx);
         tx.send(DeviceCommand::MoveTo {canvas_x:120.,canvas_y:30.,feed:1500.}).unwrap();
         wait_positioning_done(&rx);
@@ -4865,7 +4866,7 @@ mod tests {
         let trace = wire.trace.clone();
         let (tx, rx, h) = position_worker(wire);
         for command in [
-            DeviceCommand::BeginRegistration { canvas_x: f64::NAN, canvas_y: 0., preserve_scale: None },
+            DeviceCommand::BeginRegistration { canvas_x: f64::NAN, canvas_y: 0., preserve_scale: None, mapping: None },
             DeviceCommand::ApplyRegistration { origin: [0.; 2], scale: 0., rotation_deg: 0., matrix: None },
             DeviceCommand::FinishRegistration { canvas_x: 120., canvas_y: 0. },
         ] {
@@ -4915,7 +4916,7 @@ mod tests {
         let wire = PositionWire::new();
         let trace = wire.trace.clone();
         let (tx, rx, h) = position_worker(wire);
-        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: None }).unwrap();
+        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: None, mapping: None }).unwrap();
         assert_eq!(wait_positioning_done(&rx).position, Some([0.;3]));
         assert!(!trace.lock().unwrap().iter().any(|s| s.starts_with("> G1 X") || s.contains("$H")));
         tx.send(DeviceCommand::MoveTo { canvas_x: 120., canvas_y: 30., feed: 1500. }).unwrap();
@@ -4948,10 +4949,29 @@ mod tests {
         drop(tx); h.join().unwrap();
     }
     #[test]
+    fn machine_scene_points_drive_alignment_and_gcode_without_paper_angles() {
+        for (first, second, expected) in [([20.,20.],[20.,140.],[0.,-120.]), ([180.,60.],[60.,60.],[-120.,0.])] {
+            let wire = PositionWire::new();
+            let (tx, rx, h) = position_worker(wire);
+            tx.send(DeviceCommand::BeginRegistration { canvas_x:first[0], canvas_y:first[1], preserve_scale:None, mapping:None }).unwrap();
+            wait_positioning_done(&rx);
+            tx.send(DeviceCommand::MoveTo { canvas_x:second[0],canvas_y:second[1],feed:1500. }).unwrap();
+            assert_eq!(wait_positioning_done(&rx).position,Some([expected[0],expected[1],0.]));
+            tx.send(DeviceCommand::FinishRegistration { canvas_x:second[0],canvas_y:second[1] }).unwrap();
+            wait_positioning_done(&rx);
+            tx.send(DeviceCommand::MoveTo { canvas_x:second[0],canvas_y:second[1],feed:1500. }).unwrap();
+            assert_eq!(wait_positioning_done(&rx).position,Some([expected[0],expected[1],0.]));
+            let job = Job { document: crate::model::Document { name:"machine scene".into(),width_mm:160.,height_mm:240.,strokes:vec![vec![crate::model::Point{x:first[0],y:first[1]},crate::model::Point{x:second[0],y:second[1]}]] },feed:1200.,travel_feed:1500.,z_feed:300.,z_down:4. };
+            let lines=positioning::registered_job(&job,first,Registration::default()).unwrap();
+            assert!(lines.iter().any(|s|s==&format!("G1 X{:.3} Y{:.3} F1200",expected[0],expected[1])),"{lines:?}");
+            drop(tx);h.join().unwrap();
+        }
+    }
+    #[test]
     fn reopened_project_registration_preserves_axis_scales() {
         let wire = PositionWire::new();
         let (tx, rx, h) = position_worker(wire);
-        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: Some([0.8, 1.2]) }).unwrap();
+        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: Some([0.8, 1.2]), mapping: None }).unwrap();
         wait_positioning_done(&rx);
         tx.send(DeviceCommand::MoveTo { canvas_x: 120., canvas_y: 30., feed: 1500. }).unwrap();
         assert_eq!(wait_positioning_done(&rx).position, Some([80.,0.,0.]));
@@ -4972,11 +4992,11 @@ mod tests {
         let (tx, rx, h) = position_worker(wire);
         let apply = |scales| {
             let (reply, result) = mpsc::channel();
-            tx.send(DeviceCommand::SetRegistrationScale { scales, reply }).unwrap();
+            tx.send(DeviceCommand::SetRegistrationScale { scales, mapping: None, reply }).unwrap();
             result.recv_timeout(Duration::from_secs(2)).unwrap()
         };
         assert!(apply([0.8, 1.2]).is_err(), "No stale scale may establish an origin");
-        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: None }).unwrap();
+        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: None, mapping: None }).unwrap();
         wait_positioning_done(&rx);
         assert!(apply([0.8, 1.2]).is_err(), "Incomplete calibration stays locked");
         tx.send(DeviceCommand::CancelRegistration).unwrap(); wait_positioning_done(&rx);
@@ -4995,7 +5015,7 @@ mod tests {
         }}
         assert!(apply([0., 1.]).is_err()); assert!(apply([f64::NAN, 1.]).is_err());
         let (reply, abandoned) = mpsc::channel(); drop(abandoned);
-        tx.send(DeviceCommand::SetRegistrationScale { scales: [2., 2.], reply }).unwrap();
+        tx.send(DeviceCommand::SetRegistrationScale { scales: [2., 2.], mapping: None, reply }).unwrap();
         assert!(apply([0., 1.]).is_err()); // Worker barrier after the abandoned request.
         assert!(trace.lock().unwrap().iter().filter(|s| s.starts_with("> ")).all(|s| s == "> ?"));
         tx.send(DeviceCommand::MoveTo { canvas_x: 30., canvas_y: 40., feed: 1500. }).unwrap();
@@ -5010,7 +5030,7 @@ mod tests {
     fn optional_third_point_lifts_before_confirmation_and_keeps_job_locked() {
         let wire=PositionWire::new(); let trace=wire.trace.clone();
         let (tx,rx,h)=position_worker(wire);
-        tx.send(DeviceCommand::BeginRegistration{canvas_x:20.,canvas_y:30.,preserve_scale:None}).unwrap(); wait_positioning_done(&rx);
+        tx.send(DeviceCommand::BeginRegistration{canvas_x:20.,canvas_y:30.,preserve_scale:None, mapping: None }).unwrap(); wait_positioning_done(&rx);
         tx.send(DeviceCommand::MoveTo{canvas_x:120.,canvas_y:30.,feed:1500.}).unwrap(); wait_positioning_done(&rx);
         trace.lock().unwrap().clear();
         tx.send(DeviceCommand::CaptureRegistrationSecond{canvas_x:120.,canvas_y:30.}).unwrap();
@@ -5042,7 +5062,7 @@ mod tests {
         assert!(!third_trace.iter().any(|s| s.contains("G10")), "Keep point 1 as XY0 and the tip at point 3");
         assert!(third_trace.iter().any(|s| s.contains("G90 G53 G1 Z")));
         assert!(!third_trace.iter().any(|s| s.contains("$H") || s.starts_with("> G1 X")));
-        tx.send(DeviceCommand::BeginRegistration{canvas_x:20.,canvas_y:30.,preserve_scale:None}).unwrap(); wait_positioning_done(&rx);
+        tx.send(DeviceCommand::BeginRegistration{canvas_x:20.,canvas_y:30.,preserve_scale:None, mapping: None }).unwrap(); wait_positioning_done(&rx);
         tx.send(DeviceCommand::FinishRegistrationThird{canvas_x:20.,canvas_y:180.}).unwrap();
         let mut rejected=false;
         loop {match rx.recv_timeout(Duration::from_secs(2)).unwrap(){DeviceEvent::Error(_)=>rejected=true,DeviceEvent::Positioning(false)=>{assert!(rejected);break;},_=>{}}}
@@ -5051,7 +5071,7 @@ mod tests {
     #[test]
     fn cancelling_partial_three_point_mapping_invalidates_origin_without_motion() {
         let wire=PositionWire::new();let trace=wire.trace.clone();let(tx,rx,h)=position_worker(wire);
-        tx.send(DeviceCommand::BeginRegistration{canvas_x:20.,canvas_y:30.,preserve_scale:None}).unwrap();wait_positioning_done(&rx);
+        tx.send(DeviceCommand::BeginRegistration{canvas_x:20.,canvas_y:30.,preserve_scale:None, mapping: None }).unwrap();wait_positioning_done(&rx);
         // Simulates manual adjustment: measured second point differs from nominal.
         tx.send(DeviceCommand::MoveTo{canvas_x:130.,canvas_y:30.,feed:1500.}).unwrap();wait_positioning_done(&rx);
         tx.send(DeviceCommand::CaptureRegistrationSecond{canvas_x:120.,canvas_y:30.}).unwrap();
@@ -5098,7 +5118,7 @@ mod tests {
     #[test]
     fn opening_project_rejects_active_registration_and_keeps_it() {
         let (tx, rx, h) = position_worker(PositionWire::new());
-        tx.send(DeviceCommand::BeginRegistration { canvas_x:20., canvas_y:30., preserve_scale:None }).unwrap(); wait_positioning_done(&rx);
+        tx.send(DeviceCommand::BeginRegistration { canvas_x:20., canvas_y:30., preserve_scale:None, mapping: None }).unwrap(); wait_positioning_done(&rx);
         let (reply, result) = mpsc::channel(); tx.send(DeviceCommand::ForgetCalibration(reply)).unwrap();
         assert!(result.recv_timeout(Duration::from_secs(2)).unwrap().is_err());
         tx.send(DeviceCommand::Run(job())).unwrap();
@@ -5148,7 +5168,7 @@ mod tests {
     fn changing_origin_preserves_scaled_rotated_mapping_without_moving_the_tip() {
         let wire = PositionWire::new(); let trace = wire.trace.clone();
         let (tx, rx, h) = position_worker(wire);
-        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: None }).unwrap();
+        tx.send(DeviceCommand::BeginRegistration { canvas_x: 20., canvas_y: 30., preserve_scale: None, mapping: None }).unwrap();
         wait_positioning_done(&rx); trace.lock().unwrap().clear();
         tx.send(DeviceCommand::Calibrate { canvas_x: 20., canvas_y: 30., origin_x: 10., origin_y: 20., raised_confirmed: true }).unwrap();
         let mut rejected = false;
@@ -5399,54 +5419,15 @@ mod tests {
             .any(|s| s.starts_with("> $J") || s.as_str() == "> G1 G90 Z4 F300"));
     }
     #[test]
-    fn fixed_canvas_travel_limits_reject_390mm_jump_without_moving() {
+    fn finite_390mm_move_is_not_clipped_to_a4() {
         let mut wire = PositionWire::new();
-        wire.mpos = [-195., 0., 0.];
-        let trace = wire.trace.clone();
-        let (tx, rx, h) = position_worker(wire);
-        tx.send(DeviceCommand::Calibrate {
-            canvas_x: -195.,
-            canvas_y: 0.,
-            origin_x: 0.,
-            origin_y: 0.,
-            raised_confirmed: true,
-        })
-        .unwrap();
-        let mut ok = false;
-        loop {
-            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
-                DeviceEvent::CalibrationChanged { origin: Some(_) } => ok = true,
-                DeviceEvent::Positioning(false) if ok => break,
-                DeviceEvent::Error(e) => panic!("{e}"),
-                _ => {}
-            }
-        }
-        let before = trace.lock().unwrap().len();
-        tx.send(DeviceCommand::MoveTo {
-            canvas_x: 195.,
-            canvas_y: 0.,
-            feed: 1500.,
-        })
-        .unwrap();
-        let mut refused = false;
-        loop {
-            match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
-                DeviceEvent::Error(e) => {
-                    assert!(e.contains("210"));
-                    refused = true
-                }
-                DeviceEvent::Positioning(false) => {
-                    assert!(refused);
-                    break;
-                }
-                _ => {}
-            }
-        }
-        drop(tx);
-        h.join().unwrap();
-        assert!(!trace.lock().unwrap()[before..]
-            .iter()
-            .any(|s| s.starts_with("> G1 ")));
+        wire.mpos = [-195.,0.,0.];
+        let (tx,rx,h)=position_worker(wire);
+        tx.send(DeviceCommand::Calibrate {canvas_x:-195.,canvas_y:0.,origin_x:0.,origin_y:0.,raised_confirmed:true}).unwrap();
+        wait_positioning_done(&rx);
+        tx.send(DeviceCommand::MoveTo {canvas_x:195.,canvas_y:0.,feed:1500.}).unwrap();
+        assert_eq!(wait_positioning_done(&rx).position,Some([195.,0.,0.]));
+        drop(tx);h.join().unwrap();
     }
     #[test]
     fn calibration_ack_without_matching_fresh_work_coordinates_is_not_confirmation() {

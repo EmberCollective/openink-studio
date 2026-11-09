@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { registrationMatrix, validRegistrationPoints, type Registration } from "./coordinateGeometry";
 import { DraftNumberInput } from "./DraftNumberInput";
 import Toggle from "./Toggle";
+import { machineScene } from "./machineScene";
 
 export type RegistrationProfile = Registration & { id: string; name: string; width_mm: number; height_mm: number; point1: number[]; point2: number[]; point3?: number[] };
 export type RegistrationSetup = { points: number[][]; point3?: number[]; show_points: boolean; selected_profile: string };
-export function RegistrationPanel({ width, height, travelFeed, origin, registration, ready, positioning, calibrationVersion, sessionVersion, onCommand, onLock, onPointsChange, errorVersion = 0, pointEdit, editLocked = false, restoreSetup, onSetupChange, onComplete, secondPointVersion = 0, onPositioningStarted, preserveScale = false }: {
+export function RegistrationPanel({ width, height, travelFeed, origin, registration, ready, positioning, calibrationVersion, sessionVersion, onCommand, onLock, onPointsChange, errorVersion = 0, pointEdit, editLocked = false, restoreSetup, onSetupChange, onComplete, secondPointVersion = 0, onPositioningStarted, preserveScale = false, scene = machineScene(width, height, 0) }: {
   width: number; height: number; travelFeed: number; origin: number[] | null; registration: Registration;
   ready: boolean; positioning: boolean; calibrationVersion: number; sessionVersion: number;
   onCommand: (command: Record<string, unknown>) => Promise<boolean>; onLock: (locked: boolean) => void;
@@ -19,6 +20,7 @@ export function RegistrationPanel({ width, height, travelFeed, origin, registrat
   secondPointVersion?: number;
   onPositioningStarted?: () => void;
   preserveScale?: boolean;
+  scene?: ReturnType<typeof machineScene>;
 }) {
   const [point1, setPoint1] = useState(origin || [width, 0]);
   const [point2, setPoint2] = useState(() => {
@@ -133,7 +135,7 @@ export function RegistrationPanel({ width, height, travelFeed, origin, registrat
     <details className="registration-coordinate-details">
     <summary>定位点坐标 <span>精确输入</span></summary>
     <fieldset disabled={active || editLocked} className="calibration-grid">
-      {points.map((point, index) => point.map((value, axis) => <label key={`${index}-${axis}`}>第{index + 1}点 {axis === 0 ? "X" : "Y"}<DraftNumberInput className="text-input" aria-label={`第${index + 1}点${axis === 0 ? "X" : "Y"}`} type="number" step="0.1" min="0" max={axis === 0 ? width : height} value={value} onChange={e => { pointsEdited.current = true; const next = [...point]; next[axis] = Number(e.target.value); [setPoint1, setPoint2, setPoint3][index](next); setStage("idle"); }} /></label>))}
+      {points.map((point, index) => Object.values(scene.point({ x: point[0], y: point[1] })).map((value, axis) => <label key={`${index}-${axis}`}>第{index + 1}点 {axis === 0 ? "X" : "Y"}<DraftNumberInput className="text-input" aria-label={`第${index + 1}点${axis === 0 ? "X" : "Y"}`} type="number" step="0.1" value={Number(value.toFixed(4))} onChange={e => { pointsEdited.current = true; const machine = scene.point({ x: point[0], y: point[1] }); machine[axis === 0 ? "x" : "y"] = Number(e.target.value); const next = scene.inverse(machine); [setPoint1, setPoint2, setPoint3][index]([next.x, next.y]); setStage("idle"); }} /></label>))}
     </fieldset>
     </details>
     {!valid && <p role="alert" className="field-note">{threePoints ? "三点须在纸面内，第 2、3 点距第 1 点至少 100 mm，夹角须远离共线（正弦至少 0.15）。" : "两点须位于纸面内，间距至少 100 mm。"}</p>}

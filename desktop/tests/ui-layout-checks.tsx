@@ -79,8 +79,7 @@ export async function run() {
     await save(); assert.deepEqual(saved.calibration.origin, [170, 10]); assert.equal(saved.calibration.registration.rotation_deg, 0);
     assert.ok(document.querySelector('[aria-label="本次旋转"]')?.textContent?.includes("+2.000° · 临时"));
     assert.equal(document.querySelector('[data-coordinate="origin-draft"]'), null);
-    await click("将当前位置设为工作原点");
-    assert.deepEqual(requests.filter(r => r.name === "device_command").at(-1)!.args.command, { type: "confirm_manual_origin", raised_confirmed: true });
+    assert.equal([...document.querySelectorAll('button')].some(b=>b.textContent?.includes('设为工作原点')),false);
     events.push({ type: "calibration_changed", origin: [170, 10] }, { type: "registration_changed", ...sharedRegistration }, { type: "positioning", active: false });
     await act(async () => { await new Promise(r => setTimeout(r, 240)); });
     const beforeScales = await save();
@@ -135,16 +134,15 @@ export async function run() {
     assert.equal(document.body.textContent?.includes("尚未建立工作原点"), false);
     const machineCommands = () => requests.filter(r => r.name === "device_command").length;
     const beforeOrigin = machineCommands();
-    const originTool = button("设置工作原点");
+    const originTool = button("设置定位点1");
     assert.ok(originTool.closest('.canvas-edit-tools')); assert.ok(originTool.querySelector('svg')); assert.equal(originTool.textContent?.trim(), '');
-    assert.ok(button("将当前位置设为工作原点")); assert.ok(button("重置到画布左上角"));
-    await click("设置工作原点");
+    await click("设置定位点1");
     const svg = document.querySelector<SVGSVGElement>(".paper > svg")!;
     (svg as any).getScreenCTM = () => ({a:2,b:0,c:0,d:3,e:10,f:20});
     await act(async () => svg.dispatchEvent(new MouseEvent("pointerdown", { bubbles:true,button:0,clientX:70,clientY:140 })));
-    const originCommand = requests.filter(r => r.name === "device_command").at(-1)!.args.command;
-    assert.deepEqual(originCommand, { type: "calibrate", canvas_x: third[0], canvas_y: third[1], origin_x: 30, origin_y: 40, raised_confirmed: true });
-    assert.equal(machineCommands(), beforeOrigin + 1, "Origin tool executes immediately without confirmation");
-    console.log("PASS: actual PDF sizes, shared layout edits/save/reopen, automatic origin markers, icon-only toolbar and immediate origin setting (mock IPC).");
+    assert.equal(machineCommands(), beforeOrigin, "Picking an alignment point never moves or redefines machine coordinates");
+    assert.equal((document.querySelector('input[aria-label="第1点X"]') as HTMLInputElement).value,'30');
+    assert.equal((document.querySelector('input[aria-label="第1点Y"]') as HTMLInputElement).value,'40');
+    console.log("PASS: shared layout edits/save/reopen and alignment point selection without motion (mock IPC).");
   } finally { await act(async () => root.unmount()); }
 }

@@ -98,7 +98,7 @@ pub enum Request {
         canvas_y: f64,
         feed: f64,
     },
-    BeginRegistration { canvas_x: f64, canvas_y: f64, #[serde(default)] preserve_scale: Option<[f64; 2]> },
+    BeginRegistration { canvas_x: f64, canvas_y: f64, #[serde(default)] preserve_scale: Option<[f64; 2]>, #[serde(default)] mapping: Option<[f64; 4]> },
     FinishRegistration { canvas_x: f64, canvas_y: f64 },
     CaptureRegistrationSecond { canvas_x: f64, canvas_y: f64 },
     FinishRegistrationThird { canvas_x: f64, canvas_y: f64 },
@@ -107,7 +107,7 @@ pub enum Request {
     ReturnOrigin,
     ConfirmManualOrigin { raised_confirmed: bool },
     ForgetCalibration,
-    SetRegistrationScale { scales: [f64; 2] },
+    SetRegistrationScale { scales: [f64; 2], #[serde(default)] mapping: Option<[f64; 4]> },
     ResetOrigin,
     AlignTopRight {
         width_mm: f64,
@@ -155,7 +155,7 @@ pub fn device_command(command: Request, state: tauri::State<Backend>) -> Result<
             canvas_y,
             feed,
         },
-        Request::BeginRegistration { canvas_x, canvas_y, preserve_scale } => DeviceCommand::BeginRegistration { canvas_x, canvas_y, preserve_scale },
+        Request::BeginRegistration { canvas_x, canvas_y, preserve_scale, mapping } => DeviceCommand::BeginRegistration { canvas_x, canvas_y, preserve_scale, mapping },
         Request::CancelRegistration => DeviceCommand::CancelRegistration,
         Request::FinishRegistration { canvas_x, canvas_y } => DeviceCommand::FinishRegistration { canvas_x, canvas_y },
         Request::ApplyRegistration { origin, scale, rotation_deg, matrix } => DeviceCommand::ApplyRegistration { origin, scale, rotation_deg, matrix },
@@ -168,9 +168,9 @@ pub fn device_command(command: Request, state: tauri::State<Backend>) -> Result<
             state.device.lock().map_err(|e| e.to_string())?.command(DeviceCommand::ForgetCalibration(tx));
             return rx.recv_timeout(std::time::Duration::from_secs(3)).map_err(|_| "Device did not confirm project positioning reset".to_string())?;
         },
-        Request::SetRegistrationScale { scales } => {
+        Request::SetRegistrationScale { scales, mapping } => {
             let (tx, rx) = std::sync::mpsc::channel();
-            state.device.lock().map_err(|e| e.to_string())?.command(DeviceCommand::SetRegistrationScale { scales, reply: tx });
+            state.device.lock().map_err(|e| e.to_string())?.command(DeviceCommand::SetRegistrationScale { scales, mapping, reply: tx });
             return rx.recv_timeout(std::time::Duration::from_secs(3)).map_err(|_| "Device did not confirm page scales".to_string())?;
         },
         Request::ResetOrigin => DeviceCommand::ResetOrigin,

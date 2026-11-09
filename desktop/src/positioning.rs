@@ -1,7 +1,5 @@
-//! Fixed paper coordinates. Jog changes the tip position, never this origin.
+//! Software machine coordinates mapped to the real machine using an alignment point.
 use crate::{device::Job, model::Point};
-// User-authorized A4 software limits; physical travel remains unverified.
-pub(crate) const AXIS_LIMITS_MM: [f64; 2] = [210., 297.];
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Registration {
     pub scale: f64,
@@ -47,10 +45,10 @@ impl Registration {
         let (x, y) = (canvas.x - origin[0], origin[1] - canvas.y);
         let [a,b,c,d] = self.matrix.unwrap_or([self.scale*cos,-self.scale*sin,self.scale*sin,self.scale*cos]);
         let work = [a*x+b*y,c*x+d*y];
-        if !work.iter().all(|v| v.is_finite()) || (0..2).any(|a| work[a].abs() > AXIS_LIMITS_MM[a])
+        if !work.iter().all(|v| v.is_finite() && (*v as f32).is_finite())
         {
             return Err(
-                "Registered target exceeds finite A4 work envelope (X 210 mm, Y 297 mm)".into(),
+                "Registered target must be finite and controller-representable".into(),
             );
         }
         Ok(work)
@@ -75,23 +73,26 @@ impl Registration {
         }
         .validate()
     }
-    pub(crate) fn solve_preserving_scale(origin: [f64; 2], second: Point, actual: [f64; 3], scales: [f64; 2]) -> Result<Self, String> {
-        check_travel([0.; 3], [actual[0], actual[1]])?;
+    #[cfg(test)]
+    fn solve_preserving_scale(origin: [f64; 2], second: Point, actual: [f64; 3], scales: [f64; 2]) -> Result<Self, String> {
         let [sx, sy] = scales;
-        let nominal = [(second.x - origin[0]) * sx, (origin[1] - second.y) * sy];
-        if ![sx, sy, actual[0], actual[1], actual[2]].iter().all(|v| v.is_finite())
-            || !(0.1..=10.).contains(&sx) || !(0.1..=10.).contains(&sy)
+        if ![sx, sy].iter().all(|v| v.is_finite() && (0.1..=10.).contains(v)) { return Err("Invalid axis scales".into()); }
+        Self::solve_preserving_mapping(origin, second, actual, [sx,0.,0.,sy])
+    }
+    pub(crate) fn solve_preserving_mapping(origin: [f64; 2], second: Point, actual: [f64; 3], matrix: [f64; 4]) -> Result<Self, String> {
+        check_travel([0.; 3], [actual[0], actual[1]])?;
+        let base = Self { scale: 1., rotation_deg: 0., matrix: Some(matrix) }.validate()?;
+        let nominal = base.point(second, origin)?;
+        if !actual.iter().all(|v| v.is_finite())
             || nominal[0].hypot(nominal[1]) < 1. || actual[0].hypot(actual[1]) < 1. || actual[2].abs() > 0.05 {
             return Err("Scale-preserving registration requires valid axis scales and a distinct raised actual point".into());
         }
         let angle = (nominal[0] * actual[1] - nominal[1] * actual[0])
             .atan2(nominal[0] * actual[0] + nominal[1] * actual[1]);
         let (sin, cos) = angle.sin_cos();
-        Self {
-            scale: (sx + sy) / 2.,
-            rotation_deg: angle.to_degrees(),
-            matrix: Some([sx * cos, -sy * sin, sx * sin, sy * cos]),
-        }
+        let [a,b,c,d] = matrix;
+        let matrix = [cos*a-sin*c, cos*b-sin*d, sin*a+cos*c, sin*b+cos*d];
+        Self { scale: (a.hypot(c)+b.hypot(d))/2., rotation_deg: matrix[2].atan2(matrix[0]).to_degrees(), matrix: Some(matrix) }
         .validate()
     }
     pub(crate) fn validate_three_points(origin: [f64;2], second: [f64;2], third: [f64;2]) -> Result<(),String> {
@@ -134,8 +135,8 @@ pub(crate) fn work_point(canvas: Point, origin: [f64; 2]) -> Result<[f64; 2], St
         return Err("Canvas/origin coordinates must be finite".into());
     }
     let work = [canvas.x - origin[0], origin[1] - canvas.y];
-    if (0..2).any(|axis| work[axis].abs() > AXIS_LIMITS_MM[axis]) {
-        return Err("Target exceeds the fixed-origin A4 envelope (X 210 mm, Y 297 mm)".into());
+    if !work.iter().all(|v| v.is_finite() && (*v as f32).is_finite()) {
+        return Err("Target must be finite and controller-representable".into());
     }
     Ok(work)
 }
@@ -143,8 +144,8 @@ pub(crate) fn check_travel(current: [f64; 3], target: [f64; 2]) -> Result<(), St
     if !current.iter().all(|v| v.is_finite()) || !target.iter().all(|v| v.is_finite()) {
         return Err("Missing finite current/target position".into());
     }
-    if (0..2).any(|axis| (target[axis] - current[axis]).abs() > AXIS_LIMITS_MM[axis]) {
-        return Err("Travel from the current tip exceeds A4 limits (X 210 mm, Y 297 mm)".into());
+    if (0..2).any(|axis| !(target[axis] as f32).is_finite() || !((target[axis] - current[axis]) as f32).is_finite()) {
+        return Err("Travel must be controller-representable".into());
     }
     Ok(())
 }
@@ -220,6 +221,13 @@ pub(crate) fn check_registered_travel(
 mod tests {
     use super::*;
     use crate::model::Document;
+    #[test]
+    fn rotated_scale_basis_survives_alignment_without_turning_it_twice() {
+        let matrix=[1.2,0.,0.,0.8];
+        let solved=Registration::solve_preserving_mapping([180.,60.],Point{x:60.,y:60.},[-144.,0.,0.],matrix).unwrap();
+        assert_eq!(solved.matrix,Some(matrix));
+        assert_eq!(solved.point(Point{x:60.,y:60.},[180.,60.]).unwrap(),[-144.,0.]);
+    }
     #[test]
     fn preserving_axis_scales_recomputes_only_rotation() {
         let origin = [10., 20.];
@@ -307,7 +315,7 @@ mod tests {
             work_point(Point { x: 40., y: 70. }, [10., 100.]).unwrap(),
             [30., 30.]
         );
-        assert!(check_travel([-195., 0., 0.], [195., 0.]).is_err());
+        assert!(check_travel([-195., 0., 0.], [195., 0.]).is_ok());
     }
     #[test]
     fn canvas_job_preserves_page_placement_and_bounds() {
@@ -327,12 +335,16 @@ mod tests {
         assert!(lines.iter().any(|s| s == "G1 X30.000 Y30.000 F1500"));
         assert!(lines.iter().any(|s| s == "G1 X40.000 Y20.000 F1200"));
         assert!(lines.iter().any(|s| s == "G54"));
-        assert!(canvas_job(&job, [-195., 100.]).is_err());
-        assert!(check_job_travel(&job, [10., 100.], [-195., 0., 0.]).is_err());
+        assert!(canvas_job(&job, [-195., 100.]).is_ok());
+        assert!(check_job_travel(&job, [10., 100.], [-195., 0., 0.]).is_ok());
     }
 
     #[test]
-    fn a4_bottom_point_and_axis_limits_are_executable() {
+    fn finite_positions_beyond_a4_are_executable() {
+        assert_eq!(Registration::default().point(Point{x:500.,y:600.},[0.;2]).unwrap(),[500.,-600.]);
+        assert!(check_travel([-500.,600.,0.],[500.,-600.]).is_ok());
+        assert!(Registration::default().point(Point{x:f64::INFINITY,y:0.},[0.;2]).is_err());
+        assert!(check_travel([0.;3],[f64::NAN,0.]).is_err());
         let mut job = Job {
             document: Document {
                 name: "A4 PDF fixed-origin fit".into(),
@@ -350,10 +362,10 @@ mod tests {
         assert!(check_job_travel(&job, [210., 0.], [0.; 3]).is_ok());
         assert!(work_point(Point { x: 210., y: 297. }, [0.; 2]).is_ok());
         assert!(check_travel([0.; 3], [210., -297.]).is_ok());
-        assert!(check_travel([0.; 3], [210.01, 0.]).is_err());
-        assert!(check_travel([0.; 3], [0., -297.01]).is_err());
+        assert!(check_travel([0.; 3], [210.01, 0.]).is_ok());
+        assert!(check_travel([0.; 3], [0., -297.01]).is_ok());
         job.document.strokes[0][1].y = 297.01;
-        assert!(canvas_job(&job, [0., 0.]).is_err());
-        assert!(check_job_travel(&job, [0., 0.], [0.; 3]).is_err());
+        assert!(canvas_job(&job, [0., 0.]).is_ok());
+        assert!(check_job_travel(&job, [0., 0.], [0.; 3]).is_ok());
     }
 }

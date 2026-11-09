@@ -1,6 +1,6 @@
 [package]
 name = "openink-studio"
-version = "0.5.0-preview"
+version = "0.5.2"
 license = "GPL-3.0-only"
 edition = "2021"
 description = "Local-first pen plotter desktop studio"

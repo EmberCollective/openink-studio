@@ -16,12 +16,12 @@ test("layout resize scales calibration points and origin, with valid corner fall
   const setup = { points: [[200,0],[20,280]], point3: [20,0], show_points: false, selected_profile: "old" };
   const next = { ...layout, width_mm: 180, height_mm: 240 };
   const result = api.resizePositioning(setup, layout, next);
-  assert.deepEqual(result.setup.points, [[180,0],[18,224]]);
-  assert.deepEqual(result.setup.point3, [18,0]); assert.deepEqual(result.origin, [180,0]); assert.deepEqual(result.pen, [18,0]);
-  assert.equal(result.setup.show_points, false); assert.equal(result.setup.selected_profile, "");
-  assert.deepEqual(api.resizePositioning({ ...setup, points: [[100,100],[101,101]] }, layout, next).setup.points, [[180,0],[0,240]]);
+  assert.deepEqual(result.points, [[180,0],[18,224]]);
+  assert.deepEqual(result.point3, [18,0]);
+  assert.equal(result.show_points, false); assert.equal(result.selected_profile, "");
+  assert.deepEqual(api.resizePositioning({ ...setup, points: [[100,100],[101,101]] }, layout, next).points, [[180,0],[0,240]]);
   const two = api.resizePositioning({ ...setup, point3: undefined }, layout, next);
-  assert.deepEqual(two.origin, two.setup.points[0]); assert.deepEqual(two.pen, two.setup.points[1]);
+  assert.equal(two.points.length, 2);
   assert.deepEqual(setup.points, [[200,0],[20,280]]);
 });
 
