@@ -340,7 +340,7 @@ mod tests{
  #[test]
  #[cfg(not(feature = "private-gfont"))]
  fn public_build_rejects_private_font_before_loading_files(){
-  let options=TextOptions{font_mode:"legacy".into(),path:String::new(),selections:vec![FontSelection{path:"must-not-be-read.gfont".into(),weight:1.}],text:"A".into(),size_mm:10.,spacing_mm:1.,guide_lines:vec![line(20.)],start_line:0,baseline_offset_mm:0.,legacy_baseline:1.,legacy_percent:100.,legacy_seed:1,centerline:false,options:ImportOptions::default(),width_mm:100.,height_mm:100.,space_mm:None,auto_baseline:false,jitter:TextJitter::default(),rules:None,paragraph:Paragraph::default()};
+  let options=TextOptions{font_mode:"legacy".into(),path:String::new(),selections:vec![FontSelection{path:"must-not-be-read.gfont".into(),weight:1.}],text:"A".into(),size_mm:10.,spacing_mm:1.,guide_lines:vec![line(20.)],start_line:0,baseline_offset_mm:0.,legacy_baseline:1.,legacy_percent:100.,legacy_seed:1,centerline:false,options:ImportOptions::default(),width_mm:100.,height_mm:100.,space_mm:None,auto_baseline:false,stroke_variation:None,stroke_tip:None,jitter:TextJitter::default(),rules:None,paragraph:Paragraph::default()};
   assert!(!crate::commands::private_gfont_available());
   assert!(compose(&options).unwrap_err().contains("此版本不支持"));
  }
