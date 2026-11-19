@@ -13,7 +13,7 @@ export function batchOf(doc: Drawing, index: number): string {
 }
 export function batchDocument<T extends Drawing>(doc: T, id: string): T {
   const keep = doc.strokes.flatMap((_, i) => batchOf(doc, i) === id ? [i] : []);
-  return { ...doc, strokes: keep.map(i => doc.strokes[i]), strokeIds: keep.map(i => doc.strokeIds?.[i] || ""), strokeOwners: keep.map(i => doc.strokeOwners?.[i] || "") };
+  return { ...doc, strokes: keep.map(i => doc.strokes[i]), strokeIds: keep.map(i => doc.strokeIds?.[i] || ""), strokeOwners: keep.map(i => doc.strokeOwners?.[i] || ""), ...(doc.strokeGroups ? { strokeGroups: keep.map(i => doc.strokeGroups![i] ?? 0) } : {}) };
 }
 export function batchStatus(doc: Drawing, id: string, written: ReadonlySet<string>) {
   const ids = doc.strokes.flatMap((s, i) => s.length > 1 && batchOf(doc, i) === id ? [doc.strokeIds?.[i] || ""] : []);
@@ -33,7 +33,7 @@ export function cleanBatchData<T extends Drawing>(doc: T): T {
 export function replaceBatchRoute<T extends Drawing>(doc: T, id: string, replacement: Drawing, written: ReadonlySet<string>): T {
   const keep = doc.strokes.flatMap((_, i) => batchOf(doc, i) !== id || written.has(doc.strokeIds?.[i] || "") ? [i] : []);
   const next = ensureStrokeIds({ ...replacement, strokeIds: undefined });
-  const merged = { ...doc, strokes: [...keep.map(i => doc.strokes[i]), ...next.strokes], strokeIds: [...keep.map(i => doc.strokeIds![i]), ...next.strokeIds!], strokeOwners: [...keep.map(i => doc.strokeOwners?.[i] || ""), ...(next.strokeOwners || next.strokes.map(() => ""))] };
+  const merged = { ...doc, strokes: [...keep.map(i => doc.strokes[i]), ...next.strokes], strokeIds: [...keep.map(i => doc.strokeIds![i]), ...next.strokeIds!], strokeOwners: [...keep.map(i => doc.strokeOwners?.[i] || ""), ...(next.strokeOwners || next.strokes.map(() => ""))], ...(doc.strokeGroups ? { strokeGroups: [...keep.map(i => doc.strokeGroups![i] ?? 0), ...next.strokes.map(() => 0)] } : {}) };
   return cleanBatchData(assignBatch(merged, next.strokes.map((_, i) => keep.length + i), id));
 }
 export function copyBatchPage<T extends Drawing>(doc: T): T {

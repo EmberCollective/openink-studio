@@ -25,6 +25,8 @@ mod route_opt;
 mod runtime_checks;
 mod stroke_merge;
 mod stroke_refine;
+mod stroke_tip;
+mod stroke_variation;
 mod templates;
 
 fn main() {
@@ -68,11 +70,14 @@ fn main() {
             inkfont_import::inkfont_refit,
             commands::import_template,
             commands::export_template,
+            commands::import_font_rules,
+            commands::export_font_rules,
             commands::list_glyph_fonts,
             commands::save_glyph,
             commands::glyph_font_document,
             inkfont::inkfont_list, inkfont::inkfont_load, inkfont::inkfont_save,
-            inkfont::inkfont_import, inkfont::inkfont_export, inkfont::inkfont_delete
+            inkfont::inkfont_import, inkfont::inkfont_export, inkfont::inkfont_delete,
+            inkfont::inkfont_normalize_baseline
             ];
             #[cfg(feature = "private-gfont")]
             let private_handler: fn(tauri::ipc::Invoke) -> bool = tauri::generate_handler![commands::list_legacy_fonts, commands::import_legacy_fonts, commands::delete_legacy_font, commands::legacy_font_document];

@@ -8,7 +8,7 @@ export type Project = {
   pages: { document: Drawing & { route_optimized?: boolean }; background: BackgroundPage | null; layout_id?: string }[];
   layouts?: Layout[];
   current_page: number;
-  template: { id: string; name: string; description: string; width_mm: number; height_mm: number; margin_mm: number; font_size_mm: number; letter_spacing_mm: number; lines: number };
+  template: { id: string; name: string; description: string; width_mm: number; height_mm: number; margin_mm: number; font_size_mm: number; letter_spacing_mm: number; lines: number; space_mm?: number };
   writing: { feed: number; travel_feed: number; z_feed: number; z_down: number; jog_step: number };
   routing: { optimize: boolean; allow_reverse: boolean; allow_gap: boolean; max_gap: number; deduplicate: boolean };
   calibration: RegistrationSetup & { origin: number[] | null; registration: Registration; profiles: RegistrationProfile[] };

@@ -7,6 +7,8 @@ export type Layout = {
   id: string; name: string; description: string;
   width_mm: number; height_mm: number; margin_mm: number;
   font_size_mm: number; letter_spacing_mm: number; lines: number;
+  /** 空格宽度（毫米）；缺省按字号自动折算。 */
+  space_mm?: number;
   source: "template" | "manual" | "pdf" | "image";
   scale_x?: number; scale_y?: number;
   derivation?: { mode: "two" | "three"; base_width_mm: number; base_height_mm: number; scale_x: number; scale_y: number };
@@ -34,6 +36,7 @@ export function validateLayout(layout: Layout): void {
     || !Number.isFinite(layout.margin_mm) || layout.margin_mm < 0 || layout.margin_mm * 2 >= Math.min(layout.width_mm, layout.height_mm)
     || !Number.isFinite(layout.font_size_mm) || layout.font_size_mm <= 0
     || !Number.isFinite(layout.letter_spacing_mm) || layout.letter_spacing_mm < 0
+    || (layout.space_mm !== undefined && (!Number.isFinite(layout.space_mm) || layout.space_mm < 0 || layout.space_mm > 50))
     || !Number.isInteger(layout.lines) || layout.lines < 1 || layout.lines > 1000
     || !["template", "manual", "pdf", "image"].includes(layout.source)) throw new Error("版面尺寸、边距或文字参数无效");
   if ((layout.scale_x !== undefined || layout.scale_y !== undefined)
@@ -81,7 +84,7 @@ export function applyLayoutToPages(pages: readonly LayoutPage[], layout: Layout,
     if (selected.has(i) && page.document.strokes.some(stroke => stroke.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y)
       || p.x < 0 || p.y < 0 || p.x > layout.width_mm || p.y > layout.height_mm))) outside.push(i + 1);
   });
-  if (outside.length) throw new Error(`第 ${outside.join("、")} 页字迹超出新版面；请先调整内容或换版面`);
+  if (outside.length) throw new Error(`第 ${outside.join("、")} 页字迹超出新版面；可先在该页重新生成或删除文字，再应用背景（先排版后导入背景时常见）`);
   return pages.map((page, i) => {
     if (!selected.has(i)) return page;
     let background: BackgroundPage | null;
@@ -89,7 +92,7 @@ export function applyLayoutToPages(pages: readonly LayoutPage[], layout: Layout,
     catch (error) { throw new Error(`第 ${i + 1} 页：${error instanceof Error ? error.message : String(error)}`); }
     const text = page.document.text_settings;
     return { ...page, layout_id: layout.id, background, document: { ...page.document, width_mm: layout.width_mm, height_mm: layout.height_mm,
-      ...(text ? { text_settings: { ...text, font_size_mm: layout.font_size_mm, letter_spacing_mm: layout.letter_spacing_mm } } : {}) } };
+      ...(text ? { text_settings: { ...text, font_size_mm: layout.font_size_mm, letter_spacing_mm: layout.letter_spacing_mm, ...(layout.space_mm !== undefined ? { space_mm: layout.space_mm } : {}) } } : {}) } };
   });
 }
 
@@ -121,4 +124,20 @@ export function normalizeLayouts(pages: readonly LayoutPage[], template: Templat
     return { ...page, layout_id: layout.id };
   });
   return { pages: result, layouts: migrated };
+}
+
+/** 未导入纸张背景时，按版面边距与行距均分出的等距横线，用于先排版后定位。 */
+export function virtualTextGuides(
+  template: { width_mm: number; height_mm: number; margin_mm: number; font_size_mm: number; lines: number },
+  lineGap: number | null,
+) {
+  const auto = Math.max(0, (template.height_mm - 2 * template.margin_mm) / Math.max(1, template.lines) - template.font_size_mm);
+  const pitch = template.font_size_mm + (lineGap ?? auto);
+  const rows = Math.max(0, lineGap === null || pitch <= 0
+    ? template.lines
+    : Math.floor((template.height_mm - 2 * template.margin_mm - template.font_size_mm) / pitch) + 1);
+  return Array.from({ length: rows }, (_, i) => {
+    const y = template.margin_mm + template.font_size_mm + i * pitch;
+    return { id: `text-${i}`, start: [template.margin_mm, y] as [number, number], end: [template.width_mm - template.margin_mm, y] as [number, number] };
+  });
 }

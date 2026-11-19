@@ -13,6 +13,7 @@ export function unwrittenDocument<T extends Drawing>(document: T, written: Reado
     strokes: document.strokes.filter((_, index) => keep[index]),
     ...(document.strokeIds ? { strokeIds: document.strokeIds.filter((_, index) => keep[index]) } : {}),
     ...(document.strokeOwners ? { strokeOwners: document.strokeOwners.filter((_, index) => keep[index]) } : {}),
+    ...(document.strokeGroups ? { strokeGroups: document.strokeGroups.filter((_, index) => keep[index]) } : {}),
   };
 }
 
@@ -30,7 +31,7 @@ export function markCompletedStroke(written: ReadonlySet<string>, orderedIds: re
 export function replacePendingStrokes<T extends Drawing>(document: T, replacement: Drawing, written: ReadonlySet<string>): T {
   const completed = document.strokes.flatMap((_, index) => written.has(document.strokeIds?.[index] || "") ? [index] : []);
   const pending = ensureStrokeIds(replacement);
-  return { ...document, strokes: [...completed.map((index) => document.strokes[index]), ...pending.strokes], strokeIds: [...completed.map((index) => document.strokeIds![index]), ...pending.strokeIds!], strokeOwners: [...completed.map((index) => document.strokeOwners?.[index] || ""), ...(pending.strokeOwners || pending.strokes.map(() => ""))] };
+  return { ...document, strokes: [...completed.map((index) => document.strokes[index]), ...pending.strokes], strokeIds: [...completed.map((index) => document.strokeIds![index]), ...pending.strokeIds!], strokeOwners: [...completed.map((index) => document.strokeOwners?.[index] || ""), ...(pending.strokeOwners || pending.strokes.map(() => ""))], ...(document.strokeGroups ? { strokeGroups: [...completed.map((index) => document.strokeGroups![index] ?? 0), ...pending.strokes.map(() => 0)] } : {}) };
 }
 
 export function resetWrittenSelection(written: ReadonlySet<string>, document: Drawing, selection: number[]): Set<string> {

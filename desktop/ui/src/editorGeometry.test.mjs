@@ -14,6 +14,8 @@ import {
   handlePoint,
   resizeFromHandle,
   rotationFromPointer,
+  strokesOfSameOwner,
+  groupAt,
 } from "./editorGeometry.ts";
 test("guide snapping uses the whole selection ink bottom and preserves unrelated strokes", () => {
   const doc={name:"snap",width_mm:100,height_mm:100,strokes:[[{x:10,y:10},{x:20,y:24}],[{x:30,y:30},{x:40,y:39}],[{x:70,y:80},{x:80,y:90}]]};
@@ -120,4 +122,51 @@ test("pasted composition paths get independent material identities and remain de
   assert.deepEqual(removed.strokeOwners, ["original", "original", secondId]);
   assert.equal(removed.strokes.length, 3);
   assert.deepEqual(composed.strokeOwners, ["original", "original"], "Copy/paste must not mutate source ownership");
+});
+
+test('double-click expansion selects every stroke of the same inserted glyph', () => {
+  const doc = { name: "t", width_mm: 100, height_mm: 100,
+    strokes: [[{x:1,y:1},{x:2,y:2}],[{x:3,y:3},{x:4,y:4}],[{x:5,y:5},{x:6,y:6}],[{x:7,y:7},{x:8,y:8}]],
+    materials: [{id:"m1",name:"永",kind:"glyph"},{id:"m2",name:"和",kind:"glyph"}],
+    strokeOwners: ["m1","m1","m2",""] };
+  assert.deepEqual(strokesOfSameOwner(doc, 0), [0,1]);
+  assert.deepEqual(strokesOfSameOwner(doc, 2), [2]);
+  assert.deepEqual(strokesOfSameOwner(doc, 3), [3], "无归属时只选自身");
+  assert.deepEqual(strokesOfSameOwner(doc, 9), []);
+});
+
+test('double-click selects one character when character groups are present', () => {
+  const doc = { name: "t", width_mm: 100, height_mm: 100,
+    strokes: Array.from({ length: 6 }, (_, i) => [{ x: i, y: i }, { x: i + 1, y: i + 1 }]),
+    strokeOwners: ["batch", "batch", "batch", "batch", "batch", "batch"],
+    strokeGroups: [1, 1, 2, 2, 3, 3] };
+  assert.deepEqual(strokesOfSameOwner(doc, 0), [0, 1], "同一个字的两笔");
+  assert.deepEqual(strokesOfSameOwner(doc, 3), [2, 3], "第二个字");
+  assert.deepEqual(strokesOfSameOwner(doc, 5), [4, 5], "第三个字");
+  const mixed = { ...doc, strokeOwners: ["a", "a", "b", "b", "b", "b"] };
+  assert.deepEqual(strokesOfSameOwner(mixed, 0), [0, 1], "不同插入即使分组号相同也不混选");
+  assert.deepEqual(strokesOfSameOwner({ ...doc, strokeGroups: [1, 1] }, 0), [0, 1, 2, 3, 4, 5], "分组长度不匹配时退回素材分组");
+});
+
+test('paste keeps character groups aligned with the new strokes', () => {
+  const doc = { name: "t", width_mm: 100, height_mm: 100,
+    strokes: [[{ x: 0, y: 0 }, { x: 1, y: 1 }]],
+    strokeOwners: ["m"], strokeIds: ["a"], strokeGroups: [1] };
+  const pasted = pastePaths(doc, [[{ x: 5, y: 5 }, { x: 6, y: 6 }]], { x: 1, y: 1 });
+  assert.deepEqual(pasted.document.strokeGroups, [1, 0]);
+  assert.equal(pasted.document.strokeGroups.length, pasted.document.strokes.length);
+});
+
+test('groupAt hits a character even between its strokes', () => {
+  const doc = { name: "t", width_mm: 100, height_mm: 100,
+    strokes: [
+      [{ x: 0, y: 0 }, { x: 10, y: 0 }],
+      [{ x: 0, y: 10 }, { x: 10, y: 10 }],
+      [{ x: 20, y: 0 }, { x: 30, y: 0 }],
+    ],
+    strokeOwners: ["m", "m", "m"],
+    strokeGroups: [1, 1, 2] };
+  assert.equal(groupAt(doc, { x: 5, y: 5 }, 1), 0, "点在第一个字的笔画之间");
+  assert.equal(groupAt(doc, { x: 25, y: 5 }, 1), 2, "点在第二个字内部");
+  assert.equal(groupAt(doc, { x: 60, y: 60 }, 1), null, "远离所有字时不命中");
 });

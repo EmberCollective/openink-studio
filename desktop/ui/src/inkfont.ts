@@ -11,6 +11,8 @@ export const inkfontSave = (pack: InkPackage) => invoke<InkPackage>("inkfont_sav
 export const inkfontImport = (path: string) => invoke<InkPackage>("inkfont_import", { path });
 export const inkfontExport = (id: string, path: string) => invoke<void>("inkfont_export", { id, path });
 export const inkfontDelete = (id: string, revision: number) => invoke<void>("inkfont_delete", { id, revision });
+export type BaselineNormalizeResult = { revision: number; adjusted: number; skipped: number; total: number; limit_mm: number; max_shift_mm: number; mean_shift_mm: number; backup: string };
+export const inkfontNormalizeBaseline = (id: string, maxShiftMm?: number) => invoke<BaselineNormalizeResult>("inkfont_normalize_baseline", { id, max_shift_mm: maxShiftMm ?? null });
 export const newInkPackage = (name: string): InkPackage => ({ format: "openink-font", version: 1, id: "", name: name.trim(), revision: 0, variants: [] });
 export const newInkVariant = (character = ""): InkVariant => ({ id: crypto.randomUUID(), character, width_mm: 20, height_mm: 20, advance_mm: 20, strokes: [] });
 
@@ -24,6 +26,25 @@ export function inkWritingMetrics(variant: InkVariant) {
   const bounds = boundsOf({ ...variant, name: variant.character });
   const width = bounds ? bounds.width + Math.max(bounds.x, 0) : 0;
   return { x: Math.min(bounds?.x ?? 0, 0), width: width || variant.height_mm * .1, height: variant.height_mm };
+}
+
+/** 字形只能对应一个字符：把常见的省略号连打（... / 。。。 / ……）归一成单个 …。 */
+export function normalizeGlyphCharacter(input: string): string {
+  const compact = input.replace(/[\s\u3000]+/g, "");
+  if (compact.length > 1 && /^[.。…·]{2,}$/u.test(compact)) return "…";
+  return compact.length === 1 ? compact : input;
+}
+
+/** 新建字形默认占满 20mm 画布。若保存时字距仍是这个默认值，把墨迹平移到起笔处、
+ *  并按墨迹实际宽度收拢字距——避免没调整过字距的字形（如斜杠）在排版里留出大片空白。 */
+export function applyWritingAdvance(variant: InkVariant): InkVariant {
+  if (variant.advance_mm !== 20 || variant.width_mm !== 20 || variant.height_mm !== 20 || !variant.strokes.length) return variant;
+  const xs = variant.strokes.flatMap(s => s.map(p => p.x));
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return variant;
+  const strokes = variant.strokes.map(s => s.map(p => ({ ...p, x: p.x - minX + 0.1 })));
+  const advance = Math.max(2, Math.min(20, maxX - minX + 0.5));
+  return { ...variant, strokes, advance_mm: advance };
 }
 
 export function variantError(variant: InkVariant): string {

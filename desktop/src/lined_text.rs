@@ -1,7 +1,7 @@
 //! Place original font coordinates against confirmed paper baselines, without bbox re-alignment.
 use crate::model::TextJitter;
 use crate::text_rules::{RuleRequest, RuleRandom};
-use crate::{glyphs, import::{self, ImportOptions}, model::{Document, Point, Stroke}};
+use crate::{glyphs, import::{self, ImportOptions}, model::{Document, Point, Stroke, TextDocument}};
 #[cfg(feature = "private-gfont")]
 use crate::legacy_font;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,14 @@ pub struct TextOptions {
     pub baseline_offset_mm: f64, pub legacy_baseline: f64, pub legacy_percent: f64,
     pub legacy_seed: u64, pub centerline: bool, pub options: ImportOptions,
     pub width_mm: f64, pub height_mm: f64,
+    /// 空格宽度（毫米）。留空时按字号折算，见 [`crate::model::space_advance`]。
+    #[serde(default)] pub space_mm: Option<f64>,
+    /// 字包字形按墨迹底部吸附基准线；小符号与下伸字母保持原位。
+    #[serde(default)] pub auto_baseline: bool,
+    /// 同字差异强度（百分比，0–15）。仅 glyph 字包生效，让同一个字每次出现略有不同。
+    #[serde(default)] pub stroke_variation: Option<f64>,
+    /// 笔锋（仅 glyph 字包）：把单线笔画变成两端收尖的轮廓或加起收笔尖角。
+    #[serde(default)] pub stroke_tip: Option<crate::stroke_tip::TipSettings>,
     #[serde(default)] pub jitter: TextJitter,
     #[serde(default)] pub rules: Option<RuleRequest>,
     #[serde(default)] pub paragraph: Paragraph,
@@ -33,8 +41,8 @@ pub struct TextOptions {
 #[derive(Clone)]
 struct Letter { strokes: Vec<Stroke>, advance: f64 }
 
-fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: f64,
-    width: f64, height: f64, mut jitter: TextJitter, rules: Option<&RuleRequest>, paragraph: &Paragraph, mut letter: impl FnMut(char) -> Result<Letter, String>) -> Result<Document, String> {
+fn layout_with_groups(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: f64,
+    width: f64, height: f64, mut jitter: TextJitter, rules: Option<&RuleRequest>, paragraph: &Paragraph, mut letter: impl FnMut(char) -> Result<Letter, String>) -> Result<(Document, Vec<u32>), String> {
     if let Some(r)=rules {r.validate(text)?;}
     let mut random=RuleRandom(jitter.seed);
     let mut row_column=0usize;
@@ -44,9 +52,20 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
     let mut wrapped = std::collections::HashSet::new();
     let mut paragraph_start = true;
     let (mut row, mut cursor, mut count) = (start, 0., 0usize);
-    for (index,ch) in text.chars().enumerate() {
-        if ch=='\r' {continue;}
-        if ch == '\n' { row += 1; cursor = 0.; row_column=0; row_random=None; paragraph_start=true; continue; }
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    // 英文等以空白分词的文本，换行时把整个单词挪到下一行；中文这类连续非 ASCII
+    // 文本没有词边界，仍逐字换行。单词比整行还长时只尝试搬一次，随后退回逐字换行。
+    struct WordState { start: usize, cursor: f64, strokes: usize, count: usize, row_width: Option<(f64, usize)> }
+    let mut word: Option<WordState> = None;
+    let mut moved: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch=='\r' { index += 1; continue; }
+        if ch == '\n' { row += 1; cursor = 0.; row_column=0; row_random=None; paragraph_start=true; word=None; moved.clear(); index += 1; continue; }
+        if ch.is_ascii() && !ch.is_ascii_whitespace() && word.is_none() {
+            word = Some(WordState { start: index, cursor, strokes: strokes.len(), count, row_width: row_widths.get(&row).copied() });
+        }
         let mut glyph = letter(ch)?;
         let setting=rules.map(|r|r.settings(ch,index)).unwrap_or_default();
         let spacing_factor=if rules.is_some(){random.apply(&setting,&mut glyph.strokes)}else{1.};
@@ -55,6 +74,7 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
         let minx = glyph.strokes.iter().flatten().map(|p| p.x).fold(0., f64::min);
         let maxx = glyph.strokes.iter().flatten().map(|p| p.x).fold(glyph.advance, f64::max);
         let needed = maxx - minx + left + right;
+        let (mut rewound, mut skipped) = (false, false);
         loop {
             let line = guides.get(row).ok_or("文字超出已确认的横线；请增加页面、减少内容或调整字号，未插入残缺文字")?;
             let dx = line.end[0] - line.start[0]; let dy = line.end[1] - line.start[1];
@@ -65,8 +85,26 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
             let leading=if row_column==0 {first + if paragraph_start {paragraph.indent_mm} else {0.}}else{0.};
             if cursor + leading + needed > length + 1e-7 {
                 if row_column == 0 { return Err(format!("字符 {ch} 加上首行缩进宽于第 {} 条横线，请调整字号或缩进", row + 1)); }
+                // 行尾空白不该被带到下一行行首，直接换行并丢掉这个空格。
+                if ch.is_whitespace() && glyph.strokes.is_empty() {
+                    wrapped.insert(row);
+                    row += 1; cursor = 0.; row_column=0; row_random=None; word=None;
+                    skipped = true; break;
+                }
+                // 行首就开始的超长单词不该把整行清空再搬一次，交给逐字换行。
+                let can_move = word.as_ref().is_some_and(|w| w.start < index && w.cursor > 1e-7 && !moved.contains(&w.start));
+                if can_move {
+                    let w = word.take().unwrap();
+                    moved.insert(w.start);
+                    strokes.truncate(w.strokes); count = w.count;
+                    if let Some(v) = w.row_width { row_widths.insert(row, v); } else { row_widths.remove(&row); }
+                    wrapped.insert(row);
+                    row += 1; cursor = 0.; row_column=0; row_random=None;
+                    index = w.start;
+                    rewound = true; break;
+                }
                 wrapped.insert(row);
-                row += 1; cursor = 0.; row_column=0; row_random=None; continue;
+                row += 1; cursor = 0.; row_column=0; row_random=None; word=None; continue;
             }
             let (tx, ty) = (dx / length, dy / length);
             let mut placed = vec![];
@@ -87,6 +125,10 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
             paragraph_start=false;
             break;
         }
+        if rewound { continue; }
+        if skipped { word = None; index += 1; continue; }
+        if !ch.is_ascii() || ch.is_ascii_whitespace() { word = None; }
+        index += 1;
     }
 
     for (row, column, stroke) in &mut strokes {
@@ -125,13 +167,38 @@ fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: 
             return Err("文字笔迹超出页面，请调整起始横线、字号或离线距离".into());
         }
     }
-    import::validate(Document { name: "排版文字".into(), width_mm: width, height_mm: height, strokes: strokes.into_iter().map(|(_, _, stroke)| stroke).collect() })
+    // 笔画按「行-列」连续产出：同一个字的笔画相邻，换字才会换 (row, column)。
+    // 把每段连续的 (row, column) 编成一个字组，供前端双击选整字。
+    let mut groups = Vec::with_capacity(strokes.len());
+    let mut previous: Option<(usize, usize)> = None;
+    let mut group = 0u32;
+    for (row, column, _) in &strokes {
+        if previous != Some((*row, *column)) { group = group.wrapping_add(1); previous = Some((*row, *column)); }
+        groups.push(group);
+    }
+    let document = import::validate(Document { name: "排版文字".into(), width_mm: width, height_mm: height, strokes: strokes.into_iter().map(|(_, _, stroke)| stroke).collect() })?;
+    Ok((document, groups))
 }
-pub fn compose(o: &TextOptions) -> Result<Document, String> {
+/// 兼容旧调用：只取文档，丢弃字符分组。
+fn layout(text: &str, guides: &[GuideLine], start: usize, spacing: f64, offset: f64,
+    width: f64, height: f64, jitter: TextJitter, rules: Option<&RuleRequest>, paragraph: &Paragraph, letter: impl FnMut(char) -> Result<Letter, String>) -> Result<Document, String> {
+    layout_with_groups(text, guides, start, spacing, offset, width, height, jitter, rules, paragraph, letter).map(|(document, _)| document)
+}
+pub fn compose_with_groups(o: &TextOptions) -> Result<(Document, Vec<u32>), String> {
     if !o.paragraph.indent_mm.is_finite() || !(0.0..=1000.).contains(&o.paragraph.indent_mm) {
         return Err("段落缩进必须是 0–1000 mm 的有限数值".into());
     }
     o.jitter.validate()?;
+    if let Some(percent) = o.stroke_variation {
+        if !crate::stroke_variation::valid(percent) {
+            return Err("同字差异强度必须是 0–15% 的有限数值".into());
+        }
+    }
+    if let Some(tip) = &o.stroke_tip {
+        if !crate::stroke_tip::valid(tip) {
+            return Err("笔锋参数无效：宽度 0.05–2mm、起收锋 0–0.5、样式 outline/taper".into());
+        }
+    }
     if let Some(r)=&o.rules {r.validate(&o.text)?;}
     if ![o.size_mm,o.spacing_mm,o.baseline_offset_mm,o.legacy_baseline,o.legacy_percent,o.width_mm,o.height_mm].iter().all(|v|v.is_finite())
         || !(0.1..=100.).contains(&o.size_mm) || !(0.0..=100.).contains(&o.spacing_mm)
@@ -164,8 +231,8 @@ pub fn compose(o: &TextOptions) -> Result<Document, String> {
     if !["legacy","glyph","regular"].contains(&o.font_mode.as_str()) { return Err("不支持的字体来源".into()); }
     #[cfg(feature = "private-gfont")]
     let mut random=legacy_font::Random(o.legacy_seed);
-    layout(&o.text,&o.guide_lines,o.start_line,o.spacing_mm,o.baseline_offset_mm,o.width_mm,o.height_mm,o.jitter,o.rules.as_ref(),&o.paragraph,|ch| {
-        if ch.is_whitespace() { return Ok(Letter { strokes:vec![], advance:o.size_mm*if o.font_mode=="legacy" {o.legacy_percent/100.*0.3}else{0.5} }); }
+    layout_with_groups(&o.text,&o.guide_lines,o.start_line,o.spacing_mm,o.baseline_offset_mm,o.width_mm,o.height_mm,o.jitter,o.rules.as_ref(),&o.paragraph,|ch| {
+        if ch.is_whitespace() { return Ok(Letter { strokes:vec![], advance:if o.font_mode=="legacy" {o.size_mm*o.legacy_percent/100.*0.3}else{crate::model::space_advance(ch,o.size_mm,o.space_mm)} }); }
         #[cfg(feature = "private-gfont")]
         if o.font_mode=="legacy" {
             let candidates:Vec<_>=legacy.iter().filter(|(f,_)|ch as u32<=65535&&f.glyphs.contains_key(&(ch as u16))).collect();
@@ -184,8 +251,29 @@ pub fn compose(o: &TextOptions) -> Result<Document, String> {
         let glyph=if let Some(font)=&glyph_font {
             let g=font.choose(ch, &mut glyph_random).ok_or_else(||format!("本地字库缺字：{ch}"))?;
             let scale=o.size_mm/g.height_mm;
+            // 先缩放成字身坐标，再逐笔画做微小随机拉伸：这样后面的 minx/maxx、
+            // 推进量与页面越界校验都基于变换后的真实墨迹。
+            let mut body:Vec<Stroke>=g.strokes.iter().map(|s|s.iter().map(|p|Point{x:p.x*scale,y:p.y*scale}).collect()).collect();
+            if let Some(percent)=o.stroke_variation.filter(|v|*v>0.) {
+                crate::stroke_variation::vary_strokes(&mut body, percent, &mut glyph_random);
+            }
+            if let Some(tip)=&o.stroke_tip {
+                crate::stroke_tip::apply_tips(&mut body, tip);
+            }
             let baseline=o.size_mm*font.baseline_ratio.unwrap_or(1.);
-            Letter{advance:g.advance_mm*scale,strokes:g.strokes.iter().map(|s|s.iter().map(|p|Point{x:p.x*scale,y:p.y*scale-baseline}).collect()).collect()}
+            let mut shift=-baseline;
+            if o.auto_baseline {
+                let mut min_y=f64::INFINITY; let mut max_y=f64::NEG_INFINITY;
+                for p in g.strokes.iter().flatten() { min_y=min_y.min(p.y); max_y=max_y.max(p.y); }
+                let descender=matches!(ch,'g'|'p'|'q'|'y'|'j');
+                if max_y.is_finite() && min_y.is_finite() && max_y-min_y>=4. && !descender {
+                    // 用扰动后的墨迹底部吸附，避免拉伸后离基准线偏一点。
+                    let bottom=body.iter().flatten().map(|p|p.y).fold(f64::NEG_INFINITY,f64::max);
+                    if bottom.is_finite() { shift=-bottom; }
+                }
+            }
+            for p in body.iter_mut().flatten() { p.y+=shift; }
+            Letter{advance:g.advance_mm*scale,strokes:body}
         }else{
             let mut doc=if o.centerline {import::font_centerline(Path::new(&o.path),&ch.to_string(),o.size_mm,&o.options,true)?}
                 else {let mut d=import::font_text(Path::new(&o.path),&ch.to_string(),o.size_mm)?;for p in d.strokes.iter_mut().flatten(){p.y-=o.size_mm;}d};
@@ -194,12 +282,17 @@ pub fn compose(o: &TextOptions) -> Result<Document, String> {
         cache.insert(ch,glyph.clone());Ok(glyph)
     })
 }
+/// 兼容旧调用：只取文档，丢弃字符分组。
+pub fn compose(o: &TextOptions) -> Result<Document, String> {
+    compose_with_groups(o).map(|(document, _)| document)
+}
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn lined_text_document(font_mode:String,path:String,selections:Vec<FontSelection>,text:String,size_mm:f64,spacing_mm:f64,
     guide_lines:Vec<GuideLine>,start_line:usize,baseline_offset_mm:f64,legacy_baseline:f64,legacy_percent:f64,legacy_seed:u64,
-    centerline:bool,options:ImportOptions,width_mm:f64,height_mm:f64,jitter:Option<TextJitter>,rules:Option<RuleRequest>,paragraph:Option<Paragraph>)->Result<Document,String>{
-    tauri::async_runtime::spawn_blocking(move||compose(&TextOptions{font_mode,path,selections,text,size_mm,spacing_mm,guide_lines,start_line,baseline_offset_mm,legacy_baseline,legacy_percent,legacy_seed,centerline,options,width_mm,height_mm,jitter:jitter.unwrap_or_default(),rules,paragraph:paragraph.unwrap_or_default()})).await.map_err(|e|e.to_string())?
+    centerline:bool,options:ImportOptions,width_mm:f64,height_mm:f64,jitter:Option<TextJitter>,rules:Option<RuleRequest>,paragraph:Option<Paragraph>,space_mm:Option<f64>,auto_baseline:Option<bool>,stroke_variation:Option<f64>,stroke_tip:Option<crate::stroke_tip::TipSettings>)->Result<TextDocument,String>{
+    tauri::async_runtime::spawn_blocking(move||compose_with_groups(&TextOptions{font_mode,path,selections,text,size_mm,spacing_mm,guide_lines,start_line,baseline_offset_mm,legacy_baseline,legacy_percent,legacy_seed,centerline,options,width_mm,height_mm,space_mm,auto_baseline:auto_baseline.unwrap_or(false),stroke_variation,stroke_tip,jitter:jitter.unwrap_or_default(),rules,paragraph:paragraph.unwrap_or_default()})).await.map_err(|e|e.to_string())?
+        .map(|(document, groups)| TextDocument { document, groups })
 }
 
 #[cfg(test)]
@@ -228,6 +321,12 @@ mod tests{
  }
  fn line(y:f64)->GuideLine{GuideLine{id:y.to_string(),start:[10.,y],end:[25.,y]}}
  fn letter(ch:char)->Result<Letter,String>{Ok(Letter{advance:8.,strokes:vec![vec![Point{x:0.,y:if ch=='A'{-8.}else{-4.}},Point{x:6.,y:0.}]]})}
+ #[test]fn character_groups_split_strokes_per_glyph(){
+  let guides:Vec<_>=(0..3).map(|i|GuideLine{id:i.to_string(),start:[10.,20.+i as f64*15.],end:[90.,20.+i as f64*15.]}).collect();
+  let (doc,groups)=layout_with_groups("AB\nA",&guides,0,1.,0.,100.,100.,TextJitter::default(),None,&Paragraph::default(),letter).unwrap();
+  assert_eq!(doc.strokes.len(),3);
+  assert_eq!(groups,vec![1,2,3],"每个字一组，换行也另起一组");
+ }
  #[test]fn character_rules_preserve_scope_spacing_and_seed(){
   use crate::text_rules::{RuleSet, CharacterRule};
   let request=RuleRequest{rule:RuleSet{id:"one".into(),name:"test".into(),general:CharacterRule{baseline:Some(2.),left:Some(1.),right:Some(1.),..Default::default()},overrides:vec![],first_offset:[3.;2],wave_amplitude:[2.;2],wave_length:[4.;2]},selection:Some([1,2])};
@@ -241,7 +340,7 @@ mod tests{
  #[test]
  #[cfg(not(feature = "private-gfont"))]
  fn public_build_rejects_private_font_before_loading_files(){
-  let options=TextOptions{font_mode:"legacy".into(),path:String::new(),selections:vec![FontSelection{path:"must-not-be-read.gfont".into(),weight:1.}],text:"A".into(),size_mm:10.,spacing_mm:1.,guide_lines:vec![line(20.)],start_line:0,baseline_offset_mm:0.,legacy_baseline:1.,legacy_percent:100.,legacy_seed:1,centerline:false,options:ImportOptions::default(),width_mm:100.,height_mm:100.,jitter:TextJitter::default(),rules:None,paragraph:Paragraph::default()};
+  let options=TextOptions{font_mode:"legacy".into(),path:String::new(),selections:vec![FontSelection{path:"must-not-be-read.gfont".into(),weight:1.}],text:"A".into(),size_mm:10.,spacing_mm:1.,guide_lines:vec![line(20.)],start_line:0,baseline_offset_mm:0.,legacy_baseline:1.,legacy_percent:100.,legacy_seed:1,centerline:false,options:ImportOptions::default(),width_mm:100.,height_mm:100.,space_mm:None,auto_baseline:false,jitter:TextJitter::default(),rules:None,paragraph:Paragraph::default()};
   assert!(!crate::commands::private_gfont_available());
   assert!(compose(&options).unwrap_err().contains("此版本不支持"));
  }
@@ -266,4 +365,29 @@ mod tests{
  }
  #[test]fn slanted_line_rotates_whole_glyph(){let g=GuideLine{id:"a".into(),start:[10.,20.],end:[110.,30.]};let d=layout("A",&[g],0,0.,0.,200.,100.,TextJitter::default(),None,&Paragraph::default(),letter).unwrap();assert!((d.strokes[0][1].y-(20.+6./10100_f64.sqrt()*10.)).abs()<1e-6);}
  #[test]fn first_nonempty_row_fits_inside_page_without_rejecting(){let d=layout("A",&[line(20.),line(2.)],1,0.,0.,100.,100.,TextJitter::default(),None,&Paragraph::default(),letter).unwrap();assert!(d.strokes.iter().flatten().all(|p|p.y>=0.&&p.y<=100.));}
+
+ fn word_guides(n:usize)->Vec<GuideLine>{(0..n).map(|i|GuideLine{id:i.to_string(),start:[10.,20.+i as f64*15.],end:[60.,20.+i as f64*15.]}).collect()}
+ fn word_letter(ch:char)->Result<Letter,String>{
+  if ch.is_whitespace(){return Ok(Letter{advance:4.,strokes:vec![]});}
+  Ok(Letter{advance:8.,strokes:vec![vec![Point{x:0.,y:-4.},Point{x:6.,y:0.}]]})
+ }
+ #[test]fn english_word_moves_to_next_line_instead_of_splitting(){
+  let d=layout("abc def",&word_guides(3),0,1.,0.,100.,100.,TextJitter::default(),None,&Paragraph::default(),word_letter).unwrap();
+  assert_eq!(d.strokes.len(),6);
+  assert_eq!(d.strokes.iter().filter(|s|(s[0].y-16.).abs()<1e-8).count(),3,"第一行只留 abc");
+  assert_eq!(d.strokes.iter().filter(|s|(s[0].y-31.).abs()<1e-8).count(),3,"def 整体移到第二行");
+  assert!((d.strokes[3][0].x-10.).abs()<1e-8,"单词从新行行首开始");
+ }
+ #[test]fn chinese_without_spaces_still_wraps_by_character(){
+  let d=layout("一二三四五六七",&word_guides(3),0,1.,0.,100.,100.,TextJitter::default(),None,&Paragraph::default(),word_letter).unwrap();
+  assert_eq!(d.strokes.len(),7);
+  assert_eq!(d.strokes.iter().filter(|s|(s[0].y-16.).abs()<1e-8).count(),5);
+  assert_eq!(d.strokes.iter().filter(|s|(s[0].y-31.).abs()<1e-8).count(),2);
+ }
+ #[test]fn a_single_word_longer_than_a_line_falls_back_to_character_wrap(){
+  let d=layout("abcdefghij",&word_guides(3),0,1.,0.,100.,100.,TextJitter::default(),None,&Paragraph::default(),word_letter).unwrap();
+  assert_eq!(d.strokes.len(),10);
+  assert_eq!(d.strokes.iter().filter(|s|(s[0].y-16.).abs()<1e-8).count(),5,"行首超长词不清空第一行");
+  assert_eq!(d.strokes.iter().filter(|s|(s[0].y-31.).abs()<1e-8).count(),5);
+ }
 }

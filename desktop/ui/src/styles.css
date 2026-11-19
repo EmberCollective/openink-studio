@@ -485,6 +485,11 @@ input::-webkit-inner-spin-button {
   font-size: 11px;
   color: #b3b7c5;
 }
+.field-label .field-action {
+  min-height: 22px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
 .number-input {
   display: flex;
   align-items: center;
@@ -1572,6 +1577,29 @@ select {
   color: #959bad;
   line-height: 1.9;
   margin: 0;
+}
+.help-content .shortcut-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+  font-size: 13px;
+  color: #959bad;
+  line-height: 1.7;
+}
+.help-content .shortcut-list kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid #d8d4e6;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #f5f3fa;
+  color: #4a4560;
+  font-family: inherit;
+  font-size: 11px;
+  text-align: center;
 }
 .spin {
   animation: spin 1s linear infinite;
@@ -2865,6 +2893,49 @@ select,
 .path-edit-toolbar .button:disabled {
   opacity: 0.5;
 }
+.context-menu {
+  position: fixed;
+  z-index: 140;
+  min-width: 176px;
+  padding: 5px;
+  background: #fff;
+  border: 1px solid #e2dff0;
+  border-radius: 10px;
+  box-shadow: 0 14px 36px #2a234024;
+  display: grid;
+  gap: 2px;
+}
+.context-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 0;
+  background: transparent;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #3d3852;
+  text-align: left;
+  cursor: pointer;
+}
+.context-menu button:hover:not(:disabled) {
+  background: #f2effa;
+}
+.context-menu button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.context-menu kbd {
+  font-family: inherit;
+  font-size: 10px;
+  color: #9a94ad;
+}
+.context-menu hr {
+  border: 0;
+  border-top: 1px solid #eeecf5;
+  margin: 3px 2px;
+}
 .selection-inspector .icon-button {
   padding: 4px;
 }
@@ -3307,3 +3378,14 @@ select,
 .machine-reference { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
 .reference-details { margin-top: 20px; font-size: 11px; color: #737b91; }
 .reference-details > summary { cursor: pointer; padding: 0; font: inherit; }
+
+/* 设置面板：分组卡片。颜色与圆角沿用弹窗既有取值，不新增控件样式 */
+.settings-panels { display: grid; gap: 12px; }
+.settings-panel { border: 1px solid #e9ecf4; background: #fbfbfe; border-radius: 10px; padding: 15px 16px; }
+.settings-panel-title { display: flex; align-items: center; gap: 7px; margin: 0 0 12px; font-size: 12px; font-weight: 600; color: #59607a; letter-spacing: 0.2px; }
+.settings-panel-title svg { flex: none; color: #9aa1b6; }
+.settings-panel-note { margin: -2px 0 14px; font-size: 12px; line-height: 1.75; color: #9aa1b6; }
+.settings-panel > :last-child { margin-bottom: 0; }
+.settings-panel .toggle-row { margin-bottom: 10px; }
+.settings-saved { display: flex; align-items: flex-start; gap: 7px; }
+.settings-saved svg { flex: none; margin-top: 3px; color: #74b48a; }

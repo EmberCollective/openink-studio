@@ -74,7 +74,7 @@ export function PaperBackgroundWizard({ kind, width, height, python, locked, cal
       catch (e) { if (ticket === epoch.current) setError(String(e)); }
       finally { if (ticket === epoch.current) setBusy(false); }
     }
-    else if (step === 3 && calibrated && processed) onApply({ ...processed, guide_lines: processed.guide_lines?.filter(line => selected.has(line.id)), guides_visible: visible, processed: true });
+    else if (step === 3 && processed) onApply({ ...processed, guide_lines: processed.guide_lines?.filter(line => selected.has(line.id)), guides_visible: visible, processed: true });
   }
   return <section className="section paper-workflow" aria-label="纸张背景设置">
     <div className="paper-row"><strong>设置纸张背景</strong><button className="icon-button" aria-label="取消背景设置" disabled={locked} onClick={() => { epoch.current++; onCancel(); }}><X size={15} /></button></div>
@@ -89,9 +89,9 @@ export function PaperBackgroundWizard({ kind, width, height, python, locked, cal
       <Toggle label="显示全部定位横线" checked={visible} onChange={value => { setVisible(value); if (processed) onPreview({ ...processed, guide_lines: processed.guide_lines?.filter(line => selected.has(line.id)), guides_visible: value }); }} disabled={disabled} />
       <div className="paper-line-choice">{processed?.guide_lines?.map((line, i) => <button key={line.id} disabled={disabled} aria-pressed={selected.has(line.id)} onClick={() => toggleLine(line.id)}>{guideLineNumber(line, i)}</button>)}</div>
       <p className="field-note">使用画布选择工具框选横线，可拖动、删除或撤销。红色编号对应左侧选项，调整后一次确认。</p>{!processed?.guide_lines?.length && <p className="field-note paper-error">未识别到可用横线，请返回调整四角、阴影或换一张清晰图片。</p>}</>}
-    {step === 3 && <><p className="field-note">请在左侧画板的“纸面定位”完成两点或三点校准。逐点确认、抬笔移向预计位置，再在设备控制中点动微调。</p><p className="field-note">{calibrated ? "已收到设备校准完成回报，可以应用背景。" : "等待纸面校准完成；未连接设备时不能跳过。"}</p></>}
+    {step === 3 && <><p className="field-note">可以现在完成两点或三点校准，也可以先应用背景回画布排版，书写前再定位。</p><p className="field-note">{calibrated ? "已收到设备校准完成回报，可直接应用并写入对位。" : "尚未完成纸面定位：点「先应用背景」只写入背景与横线，不会建立对位；书写前仍需在「纸面定位」完成校准。"}</p></>}
     {error && <p className="field-note paper-error" role="alert">{error}</p>}{busy && <p className="field-note" role="status">{step === 1 ? "正在拉平、净化并识别横线…" : "正在读取背景…"}</p>}
     <div className="paper-row"><button className="text-button" disabled={disabled || step === 0 || step === 3} onClick={() => { setStep(s => s - 1); if (step === 2) { setProcessed(null); onPreview(preview); } }}>上一步</button>
-      <button className="button primary" disabled={disabled || (step === 0 && !preview) || (step === 1 && (!cornersReady || !validPaperCorners(corners))) || (step === 2 && !selected.size) || (step === 3 && !calibrated)} onClick={next}>{step === 3 ? "完成并应用" : step === 2 ? `确认 ${selected.size} 条并继续` : step === 1 ? "应用并继续" : "下一步"}</button></div>
+      <button className="button primary" disabled={disabled || (step === 0 && !preview) || (step === 1 && (!cornersReady || !validPaperCorners(corners))) || (step === 2 && !selected.size)} onClick={next}>{step === 3 ? (calibrated ? "完成并应用" : "先应用背景") : step === 2 ? `确认 ${selected.size} 条并继续` : step === 1 ? "应用并继续" : "下一步"}</button></div>
   </section>;
 }

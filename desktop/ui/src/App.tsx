@@ -2,11 +2,14 @@ import { InkFontManager } from "./InkFontManager";
 import { InkFontImport } from "./InkFontImport";
 import { BatchPanel, BatchAssignment } from "./BatchPanel";
 import { batchesOf, batchOf, batchDocument, batchStatus, batchColors, assignBatch, cleanBatchData, replaceBatchRoute, copyBatchPage, uniquePageStrokeIds, type Batch, type BatchData } from "./batchModel";
-import { referenceViewSize, rotatedViewSize } from "./pointerGeometry";
+import { referenceViewSize, rotatedViewSize, editingViewAngle } from "./pointerGeometry";
+import { virtualTextGuides } from "./layoutGeometry";
 import { MachineReference } from "./MachineReference";
 import { FontRulesPanel } from "./FontRulesPanel";
 import { legacyFontRule, scalarSelection, validRuleLibrary, type FontRuleLibrary, type FontRule } from "./fontRules";
 import { useProjectFiles } from "./useProjectFiles";
+import { cleanStraySpaces } from "./textCleanup";
+import { readAppSettings, writeAppSettings } from "./appSettings";
 import { version as appVersion } from "../../package.json";
 import { WindowControls, dragWindow } from "./WindowControls";
 import { useJogKeys } from "./useJogKeys";
@@ -14,7 +17,7 @@ import { ClipboardImport, type ClipboardFile } from "./ClipboardImport";
 import { emptyPage, projectPages, type Project } from "./projectModel";
 import { PageNavigation, type PageAddition } from "./PageNavigation";
 import { PaperBackgroundWizard, type GuideEditorState } from "./PaperBackgroundWizard";
-import { blankBackground, guideLineNumber, validTextSettings, type BackgroundPage, type GuideLine, type TextSettings } from "./paperModel";
+import { blankBackground, guideLineNumber, validTextSettings, DEFAULT_SPACE_EM, type BackgroundPage, type GuideLine, type TextSettings } from "./paperModel";
 import Toggle from "./Toggle";
 import RegistrationHandles from "./RegistrationHandles";
 import { RegistrationPanel, type RegistrationProfile, type RegistrationSetup } from "./RegistrationPanel";
@@ -100,11 +103,15 @@ type Document = BatchData & {
   materials?: { id: string; name: string; kind: string }[];
   strokeOwners?: string[];
   strokeIds?: string[];
+  /** 与 strokes 等长：同一数字表示同一个字的笔画（排版文字生成时写入）。 */
+  strokeGroups?: number[];
   name: string;
   width_mm: number;
   height_mm: number;
   strokes: Point[][];
 };
+/** 文字排版接口的返回值：文档 + 每条笔画的字符分组。 */
+type TextDocument = { document: Document; groups: number[] };
 type Template = {
   id: string;
   name: string;
@@ -114,6 +121,8 @@ type Template = {
   margin_mm: number;
   font_size_mm: number;
   letter_spacing_mm: number;
+  /** 空格宽度（毫米）；缺省按字号自动折算，见 DEFAULT_SPACE_EM。 */
+  space_mm?: number;
   lines: number;
 };
 type Port = { name: string; description: string; preferred: boolean };
@@ -438,6 +447,7 @@ export default function App() {
   const [textAlignment, setTextAlignment] = useState<NonNullable<TextSettings["alignment"]>>("left");
   const effectiveLineGap = lineGap ?? Math.max(0, (template.height_mm - 2 * template.margin_mm) / template.lines - template.font_size_mm);
   const customTextLayout = lineGap !== null || paragraphIndent || textAlignment !== "left";
+  const spaceWidthMm = template.space_mm ?? Number((template.font_size_mm * DEFAULT_SPACE_EM).toFixed(2));
   const paragraph = { indent_mm: paragraphIndent ? indentChars * (template.font_size_mm + template.letter_spacing_mm) : 0, alignment: textAlignment };
   const [lineStart, setLineStart] = useState(0), [lineOffset, setLineOffset] = useState(0.5);
   const background = paperPreview || backgroundPages[canvasPage];
@@ -450,6 +460,7 @@ export default function App() {
     return { text, font_mode: fontMode, font_path: font, glyph_path: glyphFont, legacy_selection: legacySelection,
       legacy_percent: legacyPercent, legacy_baseline: legacyBaseline, legacy_seed: legacySeed, centerline, jitter: textJitter, font_rules: fontRules,
       placement: textPlacement, start_line: lineStart, offset: lineOffset, font_size_mm: template.font_size_mm, letter_spacing_mm: template.letter_spacing_mm,
+      ...(template.space_mm !== undefined ? { space_mm: template.space_mm } : {}),
       ...(lineGap !== null ? { line_gap_mm: lineGap } : {}), paragraph_indent: paragraphIndent, indent_chars: indentChars, alignment: textAlignment };
   }
   function restoreTextSettings(doc: Document, replaceRules = false) {
@@ -483,7 +494,7 @@ export default function App() {
   const [activeJobDocument, setActiveJobDocument] = useState<Document | null>(
     null,
   );
-  function setDocument(next: Document | null, kind = "file", absolute = false) {
+  function setDocument(next: Document | null, kind = "file", absolute = false, groups?: number[]) {
     if (!next || editingBlocked()) return;
     if (preparedDoc && (batchStatus(preparedDoc, currentBatch.id, writtenIds) === "已完成" || batchReview.has(reviewKey))) throw new Error("当前批次已完成或需核对，请在线路中新建批次或核对后再插入");
     const id = crypto.randomUUID();
@@ -505,18 +516,38 @@ export default function App() {
       strokeOwners: [...(current.strokeOwners || current.strokes.map(() => "")), ...placed.strokes.map(() => id)],
       strokeIds: [...ensureStrokeIds(current).strokeIds!, ...placed.strokeIds!],
       strokes: [...current.strokes, ...placed.strokes],
+      // 字符分组随笔画一起追加；缺分组的一侧填 0（表示“整块”），避免长度错位。
+      strokeGroups: current.strokeGroups?.length === current.strokes.length || groups
+        ? [...(current.strokeGroups?.length === current.strokes.length ? current.strokeGroups : current.strokes.map(() => 0)), ...(groups || placed.strokes.map(() => 0))]
+        : undefined,
     };
     editor.commitAll(assignBatch(merged, placed.strokes.map((_, i) => current.strokes.length + i), currentBatch.id), placed.strokes.map((_, i) => current.strokes.length + i));
 
   }
+  // 本机设置：转换路径与默认参数不随工程保存，启动时读回上次保存的值。
+  const [initialSettings] = useState(readAppSettings);
+  const [straightenEditingView, setStraightenEditingView] = useState(initialSettings.straighten_edit_view);
+  const [autoBaseline, setAutoBaseline] = useState(initialSettings.auto_baseline);
+  // OpenInk 字包：让同一个字每次出现略有不同（逐笔画小幅随机拉伸）。
+  const [strokeVariationEnabled, setStrokeVariationEnabled] = useState(initialSettings.stroke_variation_enabled);
+  const [strokeVariationPercent, setStrokeVariationPercent] = useState(initialSettings.stroke_variation_percent);
+  const strokeVariation = strokeVariationEnabled ? strokeVariationPercent : null;
+  const [strokeTipEnabled, setStrokeTipEnabled] = useState(initialSettings.stroke_tip_enabled);
+  const [strokeTipStyle, setStrokeTipStyle] = useState<"outline" | "taper">(initialSettings.stroke_tip_style);
+  const [strokeTipWidth, setStrokeTipWidth] = useState(initialSettings.stroke_tip_width_mm);
+  const [strokeTipStart, setStrokeTipStart] = useState(initialSettings.stroke_tip_start);
+  const [strokeTipEnd, setStrokeTipEnd] = useState(initialSettings.stroke_tip_end);
+  const strokeTip = strokeTipEnabled
+    ? { style: strokeTipStyle, width_mm: strokeTipWidth, start: strokeTipStart, end: strokeTipEnd }
+    : null;
   const [options, setOptions] = useState<ImportOptions>({
     page: 1,
-    dpi: 300,
+    dpi: initialSettings.dpi,
     threshold: 180,
     conservative: false,
-    python_path: "python",
-    autotrace_path: "",
-    tolerance_mm: 0.02,
+    python_path: initialSettings.python_path,
+    autotrace_path: initialSettings.autotrace_path,
+    tolerance_mm: initialSettings.tolerance_mm,
     filter_iterations: 4,
     error_threshold: 2,
     line_threshold: 1,
@@ -538,11 +569,39 @@ export default function App() {
     [running, setRunning] = useState(false),
     [paused, setPaused] = useState(false),
     [progress, setProgress] = useState({ sent: 0, total: 0 });
-  const [feed, setFeed] = useState(1500),
-    [travelFeed, setTravelFeed] = useState(2500),
-    [zFeed, setZFeed] = useState(3000),
-    [zDown, setZDown] = useState(4),
-    [jogStep, setJogStep] = useState(1);
+  const [feed, setFeed] = useState(initialSettings.writing.feed),
+    [travelFeed, setTravelFeed] = useState(initialSettings.writing.travel_feed),
+    [zFeed, setZFeed] = useState(initialSettings.writing.z_feed),
+    [zDown, setZDown] = useState(initialSettings.writing.z_down),
+    [jogStep, setJogStep] = useState(initialSettings.writing.jog_step);
+  // 改动后延迟写入：路径输入框逐字触发，不必每次都落盘。
+  const [settingsSaved, setSettingsSaved] = useState(false);
+  const settingsTouched = useRef(false);
+  useEffect(() => {
+    if (!settingsTouched.current) {
+      settingsTouched.current = true;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (writeAppSettings({
+        python_path: options.python_path,
+        autotrace_path: options.autotrace_path,
+        dpi: options.dpi,
+        tolerance_mm: options.tolerance_mm,
+        writing: { feed, travel_feed: travelFeed, z_feed: zFeed, z_down: zDown, jog_step: jogStep },
+        straighten_edit_view: straightenEditingView,
+        auto_baseline: autoBaseline,
+        stroke_variation_enabled: strokeVariationEnabled,
+        stroke_variation_percent: strokeVariationPercent,
+        stroke_tip_enabled: strokeTipEnabled,
+        stroke_tip_style: strokeTipStyle,
+        stroke_tip_width_mm: strokeTipWidth,
+        stroke_tip_start: strokeTipStart,
+        stroke_tip_end: strokeTipEnd,
+      })) setSettingsSaved(true);
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [options.python_path, options.autotrace_path, options.dpi, options.tolerance_mm, feed, travelFeed, zFeed, zDown, jogStep, straightenEditingView, autoBaseline, strokeVariationEnabled, strokeVariationPercent, strokeTipEnabled, strokeTipStyle, strokeTipWidth, strokeTipStart, strokeTipEnd]);
   const [recovering, setRecovering] = useState(false),
     [connectionError, setConnectionError] = useState(false),
     [confirmedOrigin, setConfirmedOrigin] = useState<number[] | null>(null);
@@ -558,7 +617,7 @@ export default function App() {
   const [machineOriginReady, setMachineOriginReady] = useState(false);
   const [projectPath, setProjectPath] = useState("");
   const [projectRevision, setProjectRevision] = useState(0);
-  const projectLoaded = useRef(false);
+  const projectLoaded = useRef(false); // 工程载入后，本机默认参数不再覆盖工程内参数
   const [registrationLocked, setRegistrationLocked] = useState(false);
   const [calibrationVersion, setCalibrationVersion] = useState(0);
   const [secondPointVersion, setSecondPointVersion] = useState(0);
@@ -595,8 +654,10 @@ export default function App() {
     setJobLocked(locked);
     if (!locked) { submissionEpoch.current++; submittedStrokes.current = null; submittedOrderedIds.current = []; }
   }
-  const editPolicy = documentEditPolicy({ jobLocked: jobLocked || running, positioning: positioning || registrationLocked, recovering, converting: !!busy });
-  const mutationPolicy = documentEditPolicy({ jobLocked: jobLocked || running, positioning: positioning || registrationLocked, recovering, converting: false });
+  // 定位流程只锁摆放角度与校准参数（各控件单独判断 registrationLocked），
+  // 不再连内容编辑一起锁：没定位好也可以先排版、调整笔迹。
+  const editPolicy = documentEditPolicy({ jobLocked: jobLocked || running, positioning, recovering, converting: !!busy });
+  const mutationPolicy = documentEditPolicy({ jobLocked: jobLocked || running, positioning, recovering, converting: false });
   const editPolicyRef = useRef(mutationPolicy);
   editPolicyRef.current = mutationPolicy;
   function editingBlocked() {
@@ -607,6 +668,8 @@ export default function App() {
   const [viewRotation, setViewRotation] = useState(0);
   const paperAngleRef = useRef(viewRotation);
   paperAngleRef.current = viewRotation;
+  // 摆放角度只用于机器坐标映射；编辑视图可以单独转正，避免本子横放时文字歪着看。
+  const displayRotation = editingViewAngle(viewRotation, straightenEditingView, !!paperWizard);
   const scene = machineScene(template.width_mm, template.height_mm, viewRotation);
   const sceneRef = useRef(scene);
   sceneRef.current = scene;
@@ -851,6 +914,10 @@ export default function App() {
       template.height_mm,
     ],
   );
+  // 打开/新建工程期间判断“用户是否动过笔迹”。不能比较整份工程快照：
+  // 字体列表回填、校准面板回写等异步更新也会改快照，会误判成用户改动。
+  const preparedDocRef = useRef(preparedDoc);
+  preparedDocRef.current = preparedDoc;
   const pageBatches = preparedDoc ? batchesOf(preparedDoc) : [];
   const currentBatch = pageBatches.find(b => b.id === selectedBatch) || pageBatches[0] || { id: "default", name: "本页全部内容", color: 0 };
   const reviewKey = `${canvasPage}:${currentBatch.id}`;
@@ -1175,8 +1242,10 @@ export default function App() {
     call<{ name: string; path: string }[]>("list_fonts")
       .then((v) => {
         setFonts(v);
+        // 只在用户还没选过字体、也没载入过工程时才给默认值；
+        // 否则一次启动就会把工程里的字体改掉，还把工程标成“有未保存改动”。
         const preferred = v.find((f) => /msyh/i.test(f.name));
-        if (preferred) setFont(preferred.path);
+        if (preferred) setFont(current => (current || projectLoaded.current || projectSnapshotRef.current.pages.some(p => p.document.text_settings?.font_path) ? current : preferred.path));
       })
       .catch(() => {});
     call<Template[]>("list_templates")
@@ -1195,7 +1264,13 @@ export default function App() {
       })
       .catch((e) => notify(String(e), true));
     call<Partial<ImportOptions>>("default_import_options")
-      .then((v) => setOptions((o) => projectLoaded.current ? { ...v, ...o, python_path: v.python_path || o.python_path, autotrace_path: v.autotrace_path || o.autotrace_path } : { ...o, ...v }))
+      .then((v) => setOptions((o) => projectLoaded.current ? o : {
+        ...v,
+        ...o,
+        // 本机保存过的路径优先；仍是占位值时采用运行时探测到的绝对路径。
+        python_path: o.python_path && o.python_path !== "python" ? o.python_path : v.python_path || o.python_path || "python",
+        autotrace_path: o.autotrace_path || v.autotrace_path || "",
+      }))
       .catch(() => {});
     call<RegistrationProfile[]>("list_registration_profiles").then(v => setRegistrationProfiles(current => [...v, ...current.filter(p => !v.some(q => q.id === p.id))])).catch(e => notify(String(e), true));
     call<string | null>("startup_project_path").then(path => { if (path) void openProjectFile(path); }).catch(e => notify(String(e), true));
@@ -1284,7 +1359,10 @@ export default function App() {
               setRunning(false);
               setPositioning(false);
               setPaused(false);
-              notify("旧任务已清除，笔已抬起；已保留确认完成笔画。停止时当前笔画未确认，重新开始可能重描");
+              // 停止会软复位控制器，机器坐标归零，原点必须重认；但比例、版面与已写标记都还在，
+              // 因此只需把笔尖移回定位点1 做单点对位，不必重做两点校准。
+              setRightOpen(true); setRightTab("machine");
+              notify("已停止并复位控制器；版面与已确认笔画都保留。把笔尖移到定位点1，点「将笔尖设定在定位点1」即可继续，比例沿用本页，不用重做两点校准");
               break;
             case "recovering":
               setRecovering(!!e.active);
@@ -1390,7 +1468,7 @@ export default function App() {
     const width = scroll.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
     const height = scroll.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom);
     if (width <= 0 || height <= 0) return;
-    const size = rotatedViewSize(template.width_mm, template.height_mm, viewRotation);
+    const size = rotatedViewSize(template.width_mm, template.height_mm, displayRotation);
     setPaperFit(Math.min((width - 24) / size.width, (height - 24) / size.height));
     setZoom(1);
     requestAnimationFrame(() => {
@@ -1398,6 +1476,27 @@ export default function App() {
       scroll.scrollTop = (scroll.scrollHeight - scroll.clientHeight) / 2;
     });
   }
+  // 视图类快捷键：Ctrl+0 适应画布，Ctrl+= / Ctrl+- 缩放，? 打开使用说明。
+  const fitPaperShortcut = useRef(fitPaper);
+  fitPaperShortcut.current = fitPaper;
+  useEffect(() => {
+    const shortcuts = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest("input,textarea,select,[contenteditable=true]")) return;
+      if (event.key === "?" || event.key === "？" || (event.key === "/" && event.shiftKey)) {
+        if (target.closest("[role=dialog]")) return;
+        event.preventDefault();
+        setModal("help");
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.key === "0") { event.preventDefault(); fitPaperShortcut.current(); }
+      else if (event.key === "=" || event.key === "+") { event.preventDefault(); setZoom(z => Math.min(8, Math.round((z + 0.1) * 100) / 100)); }
+      else if (event.key === "-") { event.preventDefault(); setZoom(z => Math.max(0.3, Math.round((z - 0.1) * 100) / 100)); }
+    };
+    window.addEventListener("keydown", shortcuts);
+    return () => window.removeEventListener("keydown", shortcuts);
+  }, []);
   useEffect(() => {
     const el = paperHost.current;
     if (!el) return;
@@ -1422,24 +1521,44 @@ export default function App() {
       }
     });
   }
+  // 未导入纸张背景时，按版面边距与行距均分出等距横线，先排版、后导入背景再重排。
+  function textVirtualGuides() {
+    return virtualTextGuides(template, lineGap);
+  }
+  function hasRealGuides() {
+    return !!(background?.processed && background.guide_lines?.length);
+  }
+  /** 去掉从 PDF / Word 复制时夹在句中的多余空格，保留英文词间空格与行首缩进。 */
+  function removeStraySpaces() {
+    const { text: next, removed } = cleanStraySpaces(text);
+    if (!removed) { notify("没有发现夹在句中的多余空格"); return; }
+    setText(next);
+    setTextSelection(null);
+    notify(`已去掉 ${removed} 处多余空格`);
+  }
   async function composeText(rule: FontRule | undefined, selection: [number, number] | null, seed = crypto.getRandomValues(new Uint32Array(1))[0], sample?: { font_mode: typeof fontMode; path: string; selections: FontSelection[]; text: string }) {
     const source = sample || { font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text };
     if (!source.text.trim()) throw new Error("请输入文字内容后预览");
     if (source.font_mode === "legacy" ? !source.selections.length : !source.path) throw new Error("请先选择字体");
-        if (textPlacement === "lines" && (!background?.processed || !background.guide_lines?.length)) throw new Error("请先确认纸张背景横线");
-        const margin = template.margin_mm;
-        const pitch = template.font_size_mm + effectiveLineGap;
-        if (textPlacement === "free" && pitch < template.font_size_mm) throw new Error("行高小于字号，请减少行数或字号");
-        const rows = lineGap === null ? template.lines : Math.max(0, Math.floor((template.height_mm - 2 * margin - template.font_size_mm) / pitch) + 1);
-        const guides = textPlacement === "lines" ? background!.guide_lines! : Array.from({ length: rows }, (_, i) => ({ id: `text-${i}`, start: [margin, margin + template.font_size_mm + i * pitch] as [number, number], end: [template.width_mm - margin, margin + template.font_size_mm + i * pitch] as [number, number] }));
-        const d = await call<Document>("lined_text_document", {
+        if (textPlacement === "free" && template.font_size_mm + effectiveLineGap < template.font_size_mm) throw new Error("行高小于字号，请减少行数或字号");
+        const guides = textPlacement === "lines" && hasRealGuides() ? background!.guide_lines! : textVirtualGuides();
+        const composed = await call<TextDocument>("lined_text_document", {
           jitter: { seed }, rules: rule ? { rule, selection } : null, paragraph, ...source,
-          size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm,
+          size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm, space_mm: template.space_mm ?? null,
           guide_lines: guides, start_line: textPlacement === "lines" ? lineStart : 0, baseline_offset_mm: textPlacement === "lines" ? lineOffset : 0,
+          auto_baseline: autoBaseline, stroke_variation: strokeVariation, stroke_tip: strokeTip,
           legacy_baseline: legacyBaseline, legacy_percent: legacyPercent, legacy_seed: legacySeed,
           centerline, options, width_mm: template.width_mm, height_mm: template.height_mm,
         });
-    return { document: d, guides };
+    return { document: composed.document, guides, groups: composed.groups };
+  }
+  /** 定位或背景更新后，按当前参数与规则把本页文字重新匹配到真实横线。 */
+  async function rematchTextToBackground() {
+    if (!text.trim() || textPlacement !== "lines" || !hasRealGuides()) return;
+    if (editingBlocked() || busy) return;
+    const ok = await ask("已按当前字号、字距、空格宽度和字体规则重新生成本页文字，贴合新识别的横线；本页现有笔迹会被替换。是否继续？", { title: "按定位后的横线重新匹配文字", kind: "warning" });
+    if (!ok) return;
+    await generateText();
   }
   async function generateText() {
     if (editingBlocked()) return;
@@ -1456,23 +1575,23 @@ export default function App() {
       const selection = ruleScope === "selection" ? textSelection?.range : null;
       if (rule && ruleScope === "selection" && (!selection || textSelection?.text !== text)) throw new Error("文字选区已失效，请重新框选输入文字；未插入文字");
       if (rule || customTextLayout) {
-        const { document: d } = await composeText(rule, selection || null);
-        setDocument(d, fontMode, textPlacement === "lines" || customTextLayout);  setScale(1); setRotation(0);
+        const { document: d, groups } = await composeText(rule, selection || null);
+        setDocument(d, fontMode, textPlacement === "lines" || customTextLayout, groups);  setScale(1); setRotation(0);
         if (fontMode === "legacy") setAllowReverse(false);
         notify(rule ? `已应用规则“${rule.name}” · 随机结果已冻结` : `已按段落设置生成文字 · ${d.strokes.length} 条路径`); return;
       }
       if (textPlacement === "lines") {
-        if (!background?.processed || !background.guide_lines?.length) throw new Error("请先完成纸张背景设置并确认横线");
         if (fontMode === "legacy" && !legacySelection.length) throw new Error("请先选择原版 gfont 字体");
-        const d = await call<Document>("lined_text_document", {
+        const real = hasRealGuides();
+        const composed = await call<TextDocument>("lined_text_document", {
           jitter, paragraph, font_mode: fontMode, path: fontMode === "glyph" ? glyphFont : font, selections: legacySelection, text,
-          size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm,
-          guide_lines: background.guide_lines, start_line: lineStart, baseline_offset_mm: lineOffset,
+          size_mm: template.font_size_mm, spacing_mm: template.letter_spacing_mm, space_mm: template.space_mm ?? null,
+          guide_lines: real ? background!.guide_lines! : textVirtualGuides(), start_line: lineStart, baseline_offset_mm: lineOffset, auto_baseline: autoBaseline, stroke_variation: strokeVariation, stroke_tip: strokeTip,
           legacy_baseline: legacyBaseline, legacy_percent: legacyPercent, legacy_seed: legacySeed,
           centerline, options, width_mm: template.width_mm, height_mm: template.height_mm,
         });
-        setDocument(d, fontMode, true);  setScale(1); setRotation(0);
-        notify(`已沿背景横线生成文字 · ${d.strokes.length} 条路径`);
+        setDocument(composed.document, fontMode, true, composed.groups);  setScale(1); setRotation(0);
+        notify(real ? `已沿背景横线生成文字 · ${composed.document.strokes.length} 条路径` : `已按版面均分行距预排文字 · ${composed.document.strokes.length} 条路径；导入纸张背景后再生成一次即可贴合真实横线`);
         return;
       }
       if (fontMode === "legacy") {
@@ -1513,22 +1632,27 @@ export default function App() {
         );
         return;
       }
-      const d = await call<Document>(
-        fontMode === "glyph" ? "glyph_font_document" : "font_document",
-        {
-          path: fontMode === "glyph" ? glyphFont : font,
-          text,
-          size_mm: template.font_size_mm,
-          spacing_mm: template.letter_spacing_mm,
-          jitter,
-          rows: template.lines,
-          width_mm: template.width_mm - 2 * template.margin_mm,
-          height_mm: template.height_mm - 2 * template.margin_mm,
-          centerline,
-          options,
-        },
-      );
-      setDocument(d, fontMode);
+      const request = {
+        path: fontMode === "glyph" ? glyphFont : font,
+        text,
+        size_mm: template.font_size_mm,
+        spacing_mm: template.letter_spacing_mm,
+        space_mm: template.space_mm ?? null,
+        jitter,
+        rows: template.lines,
+        width_mm: template.width_mm - 2 * template.margin_mm,
+        height_mm: template.height_mm - 2 * template.margin_mm,
+        centerline,
+        options,
+      };
+      let d: Document, groups: number[] | undefined;
+      if (fontMode === "glyph") {
+        const result = await call<TextDocument>("glyph_font_document", { ...request, stroke_variation: strokeVariation, stroke_tip: strokeTip });
+        d = result.document; groups = result.groups;
+      } else {
+        d = await call<Document>("font_document", request);
+      }
+      setDocument(d, fontMode, false, groups);
 
       setScale(1);
       setRotation(0);
@@ -1748,7 +1872,7 @@ export default function App() {
     return value;
   }
   function snapshotLayoutPages(): Project["pages"] {
-    const current = { ...(preparedDoc || emptyPage(currentLayout.width_mm, currentLayout.height_mm)), width_mm: currentLayout.width_mm, height_mm: currentLayout.height_mm, text_settings: { ...captureTextSettings(), font_size_mm: currentLayout.font_size_mm, letter_spacing_mm: currentLayout.letter_spacing_mm } };
+    const current = { ...(preparedDoc || emptyPage(currentLayout.width_mm, currentLayout.height_mm)), width_mm: currentLayout.width_mm, height_mm: currentLayout.height_mm, text_settings: { ...captureTextSettings(), font_size_mm: currentLayout.font_size_mm, letter_spacing_mm: currentLayout.letter_spacing_mm, ...(currentLayout.space_mm !== undefined ? { space_mm: currentLayout.space_mm } : {}) } };
     return projectPages(current, canvasPage, pageDocuments.current, backgroundPages, currentLayout.width_mm, currentLayout.height_mm).map((page, i) => ({ ...page, document: { ...cleanBatchData(page.document), writtenStrokeIds: (page.document.strokeIds || []).filter(id => writtenIds.has(id)), reviewBatchIds: batchesOf(page.document).filter(b => batchReview.has(`${i}:${b.id}`)).map(b => b.id) }, layout_id: pageLayoutIds[i] || currentLayout.id }));
   }
   function installLayoutPages(pages: Project["pages"], definitions: Layout[], index = canvasPage) {
@@ -1817,6 +1941,7 @@ export default function App() {
       const [a, b, c, d] = registrationMatrix(registration);
       notify(Math.abs(a * b + c * d) > scales[0] * scales[1] * 1e-6 ? "已保存横纵比例与本次旋转；三点结果含斜切，请核对纸面贴合效果" : "已保存当前页比例；本次旋转仅在当前连接中有效");
       requestAnimationFrame(fitPaper);
+      if (!paperWizard) void rematchTextToBackground();
     } catch (error) { notify(String(error), true); }
     finally { setBusy(""); }
   }
@@ -1892,19 +2017,22 @@ export default function App() {
     return !!pending && paperWizardRef.current === pending;
   }
   function applyPaperBackground(value: BackgroundPage) {
-    if (!paperWizard || !paperCalibrated || !connected || !confirmedOrigin || status.state !== "Idle" || registrationLocked || machineBusy || busy) return;
+    if (!paperWizard || registrationLocked || machineBusy || busy) return;
     try {
+      // 未完成纸面定位时只写入背景与横线，不建立对位；回到画布可继续排版。
+      const aligned = paperCalibrated && connected && !!confirmedOrigin && status.state === "Idle";
       const size = paperDraftSize || template;
-      const [scale_x, scale_y] = registrationScales(registration);
-      const layout: Layout = { ...template, ...size, scale_x, scale_y, id: crypto.randomUUID(), name: "自定义版面", source: "image", margin_mm: Math.min(template.margin_mm, size.width_mm / 4, size.height_mm / 4) };
+      const [scale_x, scale_y] = aligned ? registrationScales(registration) : [undefined, undefined];
+      const layout: Layout = { ...template, ...size, ...(aligned ? { scale_x, scale_y } : {}), id: crypto.randomUUID(), name: "自定义版面", source: "image", margin_mm: Math.min(template.margin_mm, size.width_mm / 4, size.height_mm / 4) };
       const pages = snapshotLayoutPages();
       const index = paperWizard.newPage ? pages.length : canvasPage;
       if (paperWizard.newPage) pages.push({ document: emptyPage(layout.width_mm, layout.height_mm), background: null });
       const updated = applyLayoutToPages(pages, layout, [index]);
       updated[index].background = { ...value, width_mm: layout.width_mm, height_mm: layout.height_mm };
       installLayoutPages(updated, [...layouts, layout], index);
-      setPaperWizard(null); setPaperDraftSize(null); setPaperPreview(null); setBackgroundVisible(true); setProjectNeedsAlignment(false);
-      notify("纸张背景、横线及纸面定位已应用；定位点已同步");
+      setPaperWizard(null); setPaperDraftSize(null); setPaperPreview(null); setBackgroundVisible(true); setProjectNeedsAlignment(!aligned);
+      notify(aligned ? "纸张背景、横线及纸面定位已应用；定位点已同步" : "纸张背景与横线已应用；现在可以继续排版，书写前请在「纸面定位」完成校准");
+      if (aligned) void rematchTextToBackground();
     } catch (error) { notify(String(error), true); }
   }
   async function cancelPaperBackground() {
@@ -2014,9 +2142,9 @@ export default function App() {
   async function saveProject() { await files.saveProject(); }
   async function openProjectFile(path?: string) { await files.openProject(path); }
   async function resetProject() {
-    const previous = JSON.stringify(projectSnapshotRef.current);
+    const previous = JSON.stringify(preparedDocRef.current);
     if (!await command({ type: "forget_calibration" })) throw new Error("设备状态变更，请停稳后新建工程");
-    if (previous !== JSON.stringify(projectSnapshotRef.current)) throw new Error("工程内容在等待期间发生变化，未新建工程，请重试");
+    if (previous !== JSON.stringify(preparedDocRef.current)) throw new Error("工程内容在等待期间发生变化，未新建工程，请重试");
     const empty = emptyPage(initialTemplate.width_mm, initialTemplate.height_mm);
     setViewRotation(0);
     pageDocuments.current = new Map(); setBackgroundPages([]); setCanvasPage(0);
@@ -2037,7 +2165,7 @@ export default function App() {
     notify("已新建空白工程");
   }
   async function restoreProject(selected: string) {
-    const previous = JSON.stringify(projectSnapshotRef.current);
+    const previous = JSON.stringify(preparedDocRef.current);
     setBusy("打开完整工程");
     try {
       const value = await call<Project>("open_project", { path: selected });
@@ -2052,7 +2180,7 @@ export default function App() {
         background.data_url = rendered.data_url;
       }
       if (editingBlocked()) throw new Error("设备状态变更，未替换当前工程");
-      if (previous !== JSON.stringify(projectSnapshotRef.current)) throw new Error("工程内容在打开期间发生变化，未替换当前工程，请重试");
+      if (previous !== JSON.stringify(preparedDocRef.current)) throw new Error("工程内容在打开期间发生变化，未替换当前工程，请重试");
       if (!await command({ type: "forget_calibration" })) throw new Error("设备状态变更，请停稳后打开工程");
       projectLoaded.current = true;
       setViewRotation(0);
@@ -2140,7 +2268,7 @@ export default function App() {
   const pathCount = document?.strokes.length || 0;
   const paperWidth = template.width_mm * Math.max(0.2, paperFit) * zoom,
     paperHeight = template.height_mm * Math.max(0.2, paperFit) * zoom;
-  const viewSize = referenceViewSize(paperWidth, paperHeight, viewRotation);
+  const viewSize = referenceViewSize(paperWidth, paperHeight, displayRotation);
   return (
     <DocumentEditLock.Provider value={!editPolicy.canEditDocument}>
     <div className="studio">
@@ -2213,7 +2341,8 @@ export default function App() {
                   <div className="workspace-tab-content" hidden={leftTab !== "board"}>
                   <Section icon={<Crosshair size={17} />} title="坐标与机器参考">
                     <Toggle checked={showMachineReference} onChange={setShowMachineReference} label="显示机器虚影" disabled={machineBusy || !!paperWizard} />
-                    <p className="field-note">机器坐标固定，纸张独立摆放。</p>
+                    <Toggle checked={straightenEditingView} onChange={setStraightenEditingView} label="编辑时画布转正" disabled={machineBusy || !!paperWizard} />
+                    <p className="field-note">机器坐标固定，纸张独立摆放。转正只改变编辑显示，不改变摆放角度、对位与书写路径。</p>
                     <details className="reference-details"><summary>关于方向参考</summary><p className="field-note">定位、预览与书写统一使用背景机器坐标。定位点用于对准真实机器，不改变背景坐标原点。虚影不表示实际尺寸、位置或可书写范围。</p></details>
                   </Section>
                   {paperWizard ? <PaperBackgroundWizard key={`${paperWizard.kind}-${paperWizard.newPage}`} kind={paperWizard.kind} width={paperDraftSize?.width_mm || template.width_mm} height={paperDraftSize?.height_mm || template.height_mm} python={options.python_path} locked={machineBusy || !!busy} calibrated={paperCalibrated} canvasHost={paperCornerHost} onStageChange={setPaperStage} onGuideEditor={setPaperGuideEditor} onPreview={setPaperPreview} onCalibration={beginPaperCalibration} onApply={applyPaperBackground} onCancel={() => void cancelPaperBackground()} onSizeChange={(width_mm, height_mm) => setPaperDraftSize({ width_mm, height_mm })} /> : <Section icon={<Layers3 size={17} />} title="纸张背景">
@@ -2306,6 +2435,14 @@ export default function App() {
                         max={20}
                         step={0.5}
                       />
+                      <NumberField
+                        label="空格宽度"
+                        value={spaceWidthMm}
+                        onChange={(v) => updateTemplate("space_mm", v)}
+                        min={0}
+                        max={50}
+                        step={0.1}
+                      />
                     </div>
                     <p className="field-note">{sharedPages.length > 1 ? `共享版面 · 已用于 ${sharedPages.length} 页` : "独立版面 · 当前页"}；修改设置会同步到同组页面。</p>
                     <fieldset className="panel-fieldset" disabled={machineBusy || !!busy || registrationLocked}>
@@ -2353,7 +2490,7 @@ export default function App() {
                         <button className="icon-button" title={`删除素材 ${material.name}`} onClick={() => {
                           const current = preparedDoc!;
                           const remove = new Set(current.strokeOwners?.flatMap((owner, i) => owner === material.id ? [i] : []) || []);
-                          editor.commitAll({ ...current, materials: current.materials?.filter((m) => m.id !== material.id), strokes: current.strokes.filter((_, i) => !remove.has(i)), strokeIds: current.strokeIds?.filter((_, i) => !remove.has(i)), strokeOwners: current.strokeOwners?.filter((_, i) => !remove.has(i)) });
+                          editor.commitAll({ ...current, materials: current.materials?.filter((m) => m.id !== material.id), strokes: current.strokes.filter((_, i) => !remove.has(i)), strokeIds: current.strokeIds?.filter((_, i) => !remove.has(i)), strokeOwners: current.strokeOwners?.filter((_, i) => !remove.has(i)), ...(current.strokeGroups ? { strokeGroups: current.strokeGroups.filter((_, i) => !remove.has(i)) } : {}) });
                         }}><X size={14}/></button>
                       </div>)}
                       <p className="field-note">继续插入可叠加素材；在画布框选、移动和调整尺寸。</p>
@@ -2528,7 +2665,17 @@ export default function App() {
                             )}
                           </>
                         )}
-                        <Field label="编辑内容" hint={`${text.length} 字`}>
+                        <div className="field">
+                          <span className="field-label">
+                            <span>编辑内容 <small>{text.length} 字</small></span>
+                            <button
+                              type="button"
+                              className="button small field-action"
+                              disabled={!text.trim()}
+                              onClick={removeStraySpaces}
+                              title="去掉中文与中文、中文与数字、中文标点两侧夹着的空格（含全角空格）；英文单词之间的空格保留"
+                            >一键去空格</button>
+                          </span>
                           <textarea
                             value={text}
                             onChange={(e) => { setText(e.target.value); setTextSelection(null); }}
@@ -2536,12 +2683,13 @@ export default function App() {
                             rows={5}
                             placeholder="写下你想表达的文字…"
                           />
-                        </Field>
-                        <div className="field-grid"><NumberField label="字号" value={template.font_size_mm} onChange={v => updateTemplate("font_size_mm", v)} min={1} max={80} /><NumberField label="字间距" value={template.letter_spacing_mm} onChange={v => updateTemplate("letter_spacing_mm", v)} min={0} max={20} step={0.5} />{textPlacement === "free" && <NumberField label="行间距" value={Number(effectiveLineGap.toFixed(2))} onChange={setLineGap} min={0} max={100} step={0.5} />}</div>
+                        </div>
+                        <div className="field-grid"><NumberField label="字号" value={template.font_size_mm} onChange={v => updateTemplate("font_size_mm", v)} min={1} max={80} /><NumberField label="字间距" value={template.letter_spacing_mm} onChange={v => updateTemplate("letter_spacing_mm", v)} min={0} max={20} step={0.5} /><NumberField label="空格宽度" value={spaceWidthMm} onChange={v => updateTemplate("space_mm", v)} min={0} max={50} step={0.1} />{textPlacement === "free" && <NumberField label="行间距" value={Number(effectiveLineGap.toFixed(2))} onChange={setLineGap} min={0} max={100} step={0.5} />}</div>
                         <label className="paper-field">字体规则<select className="text-input" value={fontRules.selected} onChange={e => setFontRules(r => ({ ...r, selected: e.target.value }))}><option value="">无抖动</option>{fontRules.rules.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select></label>
                         <button className="button full" onClick={() => setRulesOpen(true)}>设置字体规则</button>
+                        {machineBusy && <p className="field-note">正在书写：字体规则仍可打开修改；改动从下次「插入文字到画布」起生效，不影响当前任务。</p>}
                         {fontRules.selected && <><label className="paper-field">本次应用范围<select className="text-input" value={ruleScope} onChange={e => setRuleScope(e.target.value as "all" | "selection")}><option value="all">本次全部文字</option><option value="selection" disabled={!textSelection && ruleScope !== "selection"}>本次选中文字</option></select></label><p className="field-note">{ruleScope === "selection" ? (textSelection?.text === text ? `已选择 ${textSelection.range[1] - textSelection.range[0]} 个字符；仅应用字符设置，不应用整行波动与首字偏移。` : "选区已失效，请重新选中文字；不会自动改为全部。") : "仅作用于本次插入，已有画布内容不变。字体与规则独立选择。"}</p></>}
-                        {rulesOpen && <FontRulesPanel library={fontRules} locked={machineBusy || !!busy} initialText={text || "山川与远方\n落笔皆有回响"} fonts={[
+                        {rulesOpen && <DocumentEditLock.Provider value={false}><FontRulesPanel library={fontRules} locked={!!busy} initialText={text || "山川与远方\n落笔皆有回响"} fonts={[
                           ...fonts.map(f => ({ id: `regular:${f.path}`, name: f.name })),
                           ...glyphFonts.map(f => ({ id: `glyph:${f.path}`, name: `${f.name} · 本地字库` })),
                           ...(privateGfont ? legacyFonts.map(f => ({ id: `legacy:${f.path}`, name: `${f.display} · 原版 gfont` })) : []),
@@ -2549,12 +2697,24 @@ export default function App() {
                           const mode = sample.font ? sample.font.slice(0, sample.font.indexOf(":")) as typeof fontMode : fontMode;
                           const path = sample.font ? sample.font.slice(sample.font.indexOf(":") + 1) : fontMode === "glyph" ? glyphFont : font;
                           return composeText(rule, null, seed, { font_mode: mode, path, selections: sample.font ? [{ path, weight: 1 }] : legacySelection, text: sample.text });
-                        }} onClose={() => setRulesOpen(false)} />}
+                        }} onClose={() => setRulesOpen(false)} /></DocumentEditLock.Provider>}
                         <div className="text-layout-options"><label className="paper-field">文字排版<select className="text-input" value={textPlacement} onChange={e => setTextPlacement(e.target.value as "free" | "lines")}><option value="free">自由排版</option><option value="lines">沿背景横线排版</option></select></label>
                           <Toggle label="自动段落缩进" checked={paragraphIndent} onChange={setParagraphIndent} />
+                          {fontMode === "glyph" && <Toggle label="自动对齐基准线" checked={autoBaseline} onChange={setAutoBaseline} />}
+                          {fontMode === "glyph" && <Toggle label="同字笔画微差异" checked={strokeVariationEnabled} onChange={setStrokeVariationEnabled} />}
+                          {fontMode === "glyph" && strokeVariationEnabled && <label className="paper-field">差异强度 / %<DraftNumberInput className="text-input" type="number" value={strokeVariationPercent} min={1} max={15} step={1} onChange={e => setStrokeVariationPercent(Math.max(1, Math.min(15, Math.round(Number(e.target.value) || 8))))} /></label>}
+                          {fontMode === "glyph" && <p className="field-note">开启后同一个字每次出现略有不同：<b>整字大小与轻微倾斜</b>、每条笔画的长短和落点都会小幅随机变化。强度越大越明显（15% 时约 ±7.5% 大小、±3° 倾斜、±0.4mm 落点），骨架仍保留、字不会散；建议 10–15%。改动从下次生成文字起生效。</p>}
+                          {fontMode === "glyph" && <Toggle label="启用笔锋" checked={strokeTipEnabled} onChange={setStrokeTipEnabled} />}
+                          {fontMode === "glyph" && strokeTipEnabled && <>
+                            <label className="paper-field">笔锋样式<select className="text-input" value={strokeTipStyle} onChange={e => setStrokeTipStyle(e.target.value as "outline" | "taper")}><option value="outline">粗细锋（两端收尖的轮廓）</option><option value="taper">单线尖锋（起收笔尖角）</option></select></label>
+                            <label className="paper-field">笔锋宽度 / mm<DraftNumberInput className="text-input" type="number" value={strokeTipWidth} min={0.05} max={2} step={0.05} onChange={e => setStrokeTipWidth(Math.max(0.05, Math.min(2, Number(e.target.value) || 0.5)))} /></label>
+                            <label className="paper-field">起锋长度（占笔画全长）<DraftNumberInput className="text-input" type="number" value={strokeTipStart} min={0} max={0.5} step={0.05} onChange={e => setStrokeTipStart(Math.max(0, Math.min(0.5, Number(e.target.value) || 0)))} /></label>
+                            <label className="paper-field">收锋长度（占笔画全长）<DraftNumberInput className="text-input" type="number" value={strokeTipEnd} min={0} max={0.5} step={0.05} onChange={e => setStrokeTipEnd(Math.max(0, Math.min(0.5, Number(e.target.value) || 0)))} /></label>
+                            <p className="field-note">写字机笔尖宽度固定，笔锋靠路径形状模拟：<b>粗细锋</b>把每条笔画变成两端尖、中间略宽的闭合轮廓，机器沿轮廓走一圈，书写时间约翻倍；<b>单线尖锋</b>只在起笔加顿点、收笔加小挑，速度几乎不变。两种都保持「一条笔画进、一条笔画出」，选字与分组不受影响。改动从下次生成文字起生效。</p>
+                          </>}
                           {paragraphIndent && <label className="paper-field">首行缩进 / 字<DraftNumberInput className="text-input" type="number" value={indentChars} min={0} max={10} step={1} onChange={e => setIndentChars(Math.max(0, Math.min(10, Math.round(Number(e.target.value) || 0))))} /></label>}
                           <label className="paper-field">对齐规则<select className="text-input" value={textAlignment} onChange={e => setTextAlignment(e.target.value as NonNullable<TextSettings["alignment"]>)}><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option><option value="justify">两端对齐</option></select></label>
-                          {textPlacement === "lines" && (background?.processed && background.guide_lines?.length ? <div className="paper-fields"><label>起始横线<select className="text-input" value={lineStart} onChange={e => setLineStart(Number(e.target.value))}>{background.guide_lines.map((line, i) => <option key={line.id} value={i}>第 {guideLineNumber(line, i)} 行</option>)}</select></label><label>离横线 / mm<DraftNumberInput className="text-input" type="number" value={lineOffset} min={0} max={10} step={0.1} onChange={e => setLineOffset(Number(e.target.value))} /></label></div> : <><p className="field-note">当前页没有已确认的横线，请先设置纸张背景。</p><button className="button" onClick={() => importBackground("image")}>设置纸张背景</button></>)}
+                          {textPlacement === "lines" && (background?.processed && background.guide_lines?.length ? <div className="paper-fields"><label>起始横线<select className="text-input" value={lineStart} onChange={e => setLineStart(Number(e.target.value))}>{background.guide_lines.map((line, i) => <option key={line.id} value={i}>第 {guideLineNumber(line, i)} 行</option>)}</select></label><label>离横线 / mm<DraftNumberInput className="text-input" type="number" value={lineOffset} min={0} max={10} step={0.1} onChange={e => setLineOffset(Number(e.target.value))} /></label></div> : <><p className="field-note">当前页还没有纸张背景：现在按版面边距与行距均分预排，导入照片/PDF 背景并完成纸面定位后，再点一次「生成文字路径」即可贴合真实横线。</p><button className="button" onClick={() => importBackground("image")}>设置纸张背景</button></>)}
                         </div>
                         {fontMode === "regular" && (
                           <>
@@ -2821,7 +2981,7 @@ export default function App() {
                   <div className="tip-card">
                     <span className="tip-dot" />
                     <p>
-                      素材可反复插入，已有内容保留。框选路径后移动、缩放或旋转；图片与 PDF 支持中心线提取。
+                      素材可反复插入，已有内容保留。框选路径后移动、缩放或旋转；单击字的空白处或双击笔画即可选中整字，<kbd>Shift</kbd> 拖拽加选、<kbd>Alt</kbd> 拖拽减选；图片与 PDF 支持中心线提取。
                     </p>
                   </div>
                 </div>
@@ -2927,10 +3087,10 @@ export default function App() {
                 <div className="paper-corner-host" ref={setPaperCornerHost} hidden={!paperWizard || paperStage !== 1} />
                 <div hidden={!!paperWizard && paperStage === 1} className={`paper-scroll ${pan.panActive ? "pan-ready" : ""} ${pan.panning ? "panning" : ""}`} tabIndex={0} aria-label="画布视图区" {...pan.bind}>
                   <CanvasPointerOverlay toMachinePoint={scene.point} width={template.width_mm} height={template.height_mm} paperWidth={viewSize.width} paperHeight={viewSize.height} origin={coordinateOrigin} registration={registration} host={paperHost.current} onSelectAlignmentPoint={selectingAlignmentPoint ? selectAlignmentPoint : undefined}>
-                  <MachineReference angle={viewRotation} ghost={showMachineReference} paperWidth={paperWidth} paperHeight={paperHeight} />
+                  <MachineReference angle={displayRotation} ghost={showMachineReference} paperWidth={paperWidth} paperHeight={paperHeight} />
                   <div
                     className="paper"
-                    style={{ width: paperWidth, height: paperHeight, position: "absolute", left: (viewSize.width - paperWidth) / 2, top: (viewSize.height - paperHeight) / 2, transform: `rotate(${viewRotation}deg)` }}
+                    style={{ width: paperWidth, height: paperHeight, position: "absolute", left: (viewSize.width - paperWidth) / 2, top: (viewSize.height - paperHeight) / 2, transform: `rotate(${displayRotation}deg)` }}
                   >
                     <svg
                       viewBox={`0 0 ${template.width_mm} ${template.height_mm}`}
@@ -3609,6 +3769,7 @@ export default function App() {
           </footer>
         </div>
         {files.confirmation}
+        {activeEditor.contextMenu}
         {layoutDialog && <LayoutPagesDialog pages={snapshotLayoutPages()} layout={currentLayout} currentPage={canvasPage} disabled={machineBusy || !!busy || registrationLocked} onClose={() => setLayoutDialog(false)} onApply={async selected => {
         if (await changeLayout(currentLayout, selected)) { setLayoutDialog(false); notify(`已将版面与比例应用到 ${selected.length} 页`); }
       }} />}
@@ -4053,85 +4214,95 @@ export default function App() {
                   </>
                 )}
                 {modal === "settings" && (
-                  <>
-                    <Toggle label="X/Y 轴对调" checked={swapXY} onChange={changeSwapXY} disabled={!!connected || connecting || machineBusy} />
-                    <p className="field-note">按机型交换控制器的 X/Y 轴，书写和点动方向一起调整。此设置保存在本机；请断开连接后修改，再重新校准。</p>
-                    <p className="modal-description">
-                      SVG 原生解析。PDF / 图片与字体中心线转换使用本机 Python 和
-                      AutoTrace。
-                    </p>
-                    <Field label="Python 可执行文件">
-                      <input
-                        className="text-input"
-                        value={options.python_path}
-                        onChange={(e) =>
-                          setOptions((o) => ({
-                            ...o,
-                            python_path: e.target.value,
-                          }))
-                        }
-                      />
-                    </Field>
-                    <Field label="AutoTrace 可执行文件">
-                      <div className="path-input">
+                  <div className="settings-panels">
+                    <section className="settings-panel">
+                      <h3 className="settings-panel-title"><Crosshair size={14} />机器方向</h3>
+                      <Toggle label="X/Y 轴对调" checked={swapXY} onChange={changeSwapXY} disabled={!!connected || connecting || machineBusy} />
+                      <p className="field-note">按机型交换控制器的 X/Y 轴，书写和点动方向一起调整。请断开连接后修改，再重新校准。</p>
+                    </section>
+                    <section className="settings-panel">
+                      <h3 className="settings-panel-title"><Terminal size={14} />转换工具</h3>
+                      <p className="settings-panel-note">SVG 原生解析；PDF、图片与字体中心线转换使用本机 Python 与 AutoTrace。</p>
+                      <Field label="Python 可执行文件">
                         <input
-                          value={options.autotrace_path}
-                          placeholder="选择 autotrace.exe"
+                          className="text-input"
+                          value={options.python_path}
                           onChange={(e) =>
                             setOptions((o) => ({
                               ...o,
-                              autotrace_path: e.target.value,
+                              python_path: e.target.value,
                             }))
                           }
                         />
-                        <button
-                          className="icon-button"
-                          onClick={async () => {
-                            try {
-                              const p = await open({
-                                multiple: false,
-                                filters: [
-                                  { name: "可执行文件", extensions: ["exe"] },
-                                ],
-                              });
-                              if (typeof p === "string")
-                                setOptions((o) => ({
-                                  ...o,
-                                  autotrace_path: p,
-                                }));
-                            } catch (e) {
-                              notify(String(e), true);
+                      </Field>
+                      <Field label="AutoTrace 可执行文件">
+                        <div className="path-input">
+                          <input
+                            value={options.autotrace_path}
+                            placeholder="选择 autotrace.exe"
+                            onChange={(e) =>
+                              setOptions((o) => ({
+                                ...o,
+                                autotrace_path: e.target.value,
+                              }))
                             }
-                          }}
-                        >
-                          <FolderOpen size={17} />
-                        </button>
+                          />
+                          <button
+                            className="icon-button"
+                            onClick={async () => {
+                              try {
+                                const p = await open({
+                                  multiple: false,
+                                  filters: [
+                                    { name: "可执行文件", extensions: ["exe"] },
+                                  ],
+                                });
+                                if (typeof p === "string")
+                                  setOptions((o) => ({
+                                    ...o,
+                                    autotrace_path: p,
+                                  }));
+                              } catch (e) {
+                                notify(String(e), true);
+                              }
+                            }}
+                          >
+                            <FolderOpen size={17} />
+                          </button>
+                        </div>
+                      </Field>
+                    </section>
+                    <section className="settings-panel">
+                      <h3 className="settings-panel-title"><Settings2 size={14} />转换参数</h3>
+                      <div className="field-grid">
+                        <NumberField
+                          label="转换分辨率"
+                          value={options.dpi}
+                          onChange={(v) => setOptions((o) => ({ ...o, dpi: v }))}
+                          min={36}
+                          max={1200}
+                          unit="dpi"
+                        />
+                        <NumberField
+                          label="曲线误差"
+                          value={options.tolerance_mm}
+                          onChange={(v) =>
+                            setOptions((o) => ({ ...o, tolerance_mm: v }))
+                          }
+                          min={0.005}
+                          max={1}
+                          step={0.005}
+                        />
                       </div>
-                    </Field>
-                    <div className="field-grid">
-                      <NumberField
-                        label="转换分辨率"
-                        value={options.dpi}
-                        onChange={(v) => setOptions((o) => ({ ...o, dpi: v }))}
-                        min={36}
-                        max={1200}
-                        unit="dpi"
-                      />
-                      <NumberField
-                        label="曲线误差"
-                        value={options.tolerance_mm}
-                        onChange={(v) =>
-                          setOptions((o) => ({ ...o, tolerance_mm: v }))
-                        }
-                        min={0.005}
-                        max={1}
-                        step={0.005}
-                      />
-                    </div>
-                    <p className="settings-note">
-                      路径仅用于本机转换，不上传文件，也不更改机器固件。
+                    </section>
+                    <p className="settings-note settings-saved">
+                      <Check size={14} />
+                      <span>
+                        {settingsSaved ? "已保存到本机，重启后自动恢复。" : "修改后自动保存到本机，重启后自动恢复。"}
+                        路径仅用于本机转换，不上传文件，也不更改机器固件。
+                      </span>
                     </p>
-                  </>
+                  </div>
                 )}
                 {modal === "templates" && (
                   <>
@@ -4210,6 +4381,18 @@ export default function App() {
                 )}
                 {modal === "help" && (
                   <div className="help-content">
+                    <h3>快捷键</h3>
+                    <ul className="shortcut-list">
+                      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> 撤销 · <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> 重做</li>
+                      <li><kbd>Ctrl</kbd>+<kbd>A</kbd> 全选 · <kbd>Ctrl</kbd>+<kbd>C</kbd>/<kbd>X</kbd>/<kbd>V</kbd> 复制/剪切/粘贴 · <kbd>Ctrl</kbd>+<kbd>D</kbd> 原位复制</li>
+                      <li><kbd>Delete</kbd> 删除选中 · <kbd>Esc</kbd> 取消选择</li>
+                      <li><kbd>方向键</kbd> 移动 1mm · <kbd>Shift</kbd>+<kbd>方向键</kbd> 5mm · <kbd>Alt</kbd>+<kbd>方向键</kbd> 0.1mm</li>
+                      <li>单击字的空白处选中整字（可直接拖动）；双击笔画也可选中整字；<kbd>Shift</kbd> 加选、<kbd>Alt</kbd> 减选（拖拽框选同样适用）</li>
+                      <li><b>右键画布</b>可弹出复制、剪切、粘贴、原位复制、删除、全选等菜单；选中笔画后还有「整理选区」：按书写顺序排序、拼接近端点、删除重复笔画（都可撤销）</li>
+                      <li><kbd>Ctrl</kbd>+<kbd>0</kbd> 适应画布 · <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> 缩放 · <kbd>Ctrl</kbd>+滚轮缩放</li>
+                      <li><kbd>Ctrl</kbd>+<kbd>S</kbd> 保存 · <kbd>Ctrl</kbd>+<kbd>O</kbd> 打开 · <kbd>Ctrl</kbd>+<kbd>N</kbd> 新建</li>
+                      <li><kbd>?</kbd> 打开本说明</li>
+                    </ul>
                     <h3>1. 准备书写路径</h3>
                     <p>
                       选择普通 TTF / OTF 字体并生成文字，或导入

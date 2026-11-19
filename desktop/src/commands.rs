@@ -398,6 +398,7 @@ fn layout_font(
     text: &str,
     size: f64,
     spacing: f64,
+    space_mm: Option<f64>,
     rows: usize,
     width: f64,
     height: f64,
@@ -428,18 +429,25 @@ fn layout_font(
     let mut strokes = vec![];
     let mut x = 0.;
     let mut row = 0;
-    for ch in text.chars() {
-        if ch == '\r' {
-            continue;
-        }
-        if ch == '\n' {
-            row += 1;
-            x = 0.;
-            continue;
-        }
+    let all: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    // 英文单词整体换行；中文等连续非 ASCII 文本仍逐字换行，超长词只搬一次。
+    struct WordState { start: usize, x: f64, row: usize, strokes: usize }
+    let mut word: Option<WordState> = None;
+    let mut moved: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    while index < all.len() {
+        let ch = all[index];
+        if ch == '\r' { index += 1; continue; }
+        if ch == '\n' { row += 1; x = 0.; word = None; moved.clear(); index += 1; continue; }
         if ch.is_whitespace() {
-            x += size * 0.5 + spacing;
-            continue;
+            let space = crate::model::space_advance(ch, size, space_mm) + spacing;
+            // 行尾空白放不下时直接换行，不带到下一行行首。
+            if x > 0. && x + space > width { row += 1; x = 0.; word = None; }
+            else { x += space; }
+            index += 1; continue;
+        }
+        if ch.is_ascii() && word.is_none() {
+            word = Some(WordState { start: index, x, row, strokes: strokes.len() });
         }
         if !glyphs.contains_key(&ch) {
             let s = ch.to_string();
@@ -479,10 +487,21 @@ fn layout_font(
         if ink_width > width {
             return Err(format!("字符 {ch} 宽度超过可写区域"));
         }
+        let mut rewound = false;
         if x + ink_width > width {
-            row += 1;
-            x = 0.;
+            let can_move = word.as_ref().is_some_and(|w| w.start < index && w.x > 1e-7 && !moved.contains(&w.start));
+            if can_move {
+                let w = word.take().unwrap();
+                moved.insert(w.start);
+                strokes.truncate(w.strokes);
+                row = w.row + 1; x = 0.;
+                index = w.start;
+                rewound = true;
+            } else {
+                row += 1; x = 0.; word = None;
+            }
         }
+        if rewound { continue; }
         if row >= rows || row as f64 * pitch + (maxy - miny) > height {
             return Err("文字超出当前模板，请调整字号、行数或页尺寸".into());
         }
@@ -500,6 +519,8 @@ fn layout_font(
         }
         jitter.apply(&mut strokes[first_stroke..]);
         x += glyph.width_mm.max(ink_width) + spacing;
+        if !ch.is_ascii() { word = None; }
+        index += 1;
     }
     if strokes.is_empty() {
         return Err("没有可书写文字".into());
@@ -528,6 +549,7 @@ pub async fn font_document(
     centerline: bool,
     options: ImportOptions,
     jitter: Option<TextJitter>,
+    space_mm: Option<f64>,
 ) -> Result<Document, String> {
     tauri::async_runtime::spawn_blocking(move || {
         layout_font(
@@ -535,6 +557,7 @@ pub async fn font_document(
             &text,
             size_mm,
             spacing_mm,
+            space_mm,
             rows,
             width_mm,
             height_mm,
@@ -621,6 +644,26 @@ pub fn export_template(path: String, template: Template) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())
 }
+/// 字体规则库单独导出为 JSON，供跨工程备份与复用。
+#[tauri::command(rename_all = "snake_case")]
+pub fn export_font_rules(path: String, library: Value) -> Result<(), String> {
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&library).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+/// 读取字体规则库 JSON；同时兼容工程提取出来的 { library: ... } 包装格式。
+#[tauri::command(rename_all = "snake_case")]
+pub fn import_font_rules(path: String) -> Result<Value, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("无法读取字体规则文件：{e}"))?;
+    let mut value: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("字体规则文件不是有效的 JSON：{e}"))?;
+    if let Some(inner) = value.get("library").cloned() {
+        value = inner;
+    }
+    Ok(value)
+}
 #[tauri::command]
 pub fn list_fonts() -> Vec<Value> {
     let base = std::env::var_os("WINDIR")
@@ -663,26 +706,49 @@ pub async fn glyph_font_document(
     width_mm: f64,
     height_mm: f64,
     jitter: Option<TextJitter>,
-) -> Result<Document, String> {
+    space_mm: Option<f64>,
+    stroke_variation: Option<f64>,
+    stroke_tip: Option<crate::stroke_tip::TipSettings>,
+) -> Result<crate::model::TextDocument, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::glyphs::compose_jittered(
+        crate::glyphs::compose_jittered_space_groups(
             Path::new(&path),
             &text,
             size_mm,
             spacing_mm,
+            space_mm,
             rows,
             width_mm,
             height_mm,
             jitter.unwrap_or_default(),
+            stroke_variation,
+            stroke_tip,
         )
     })
     .await
     .map_err(|e| e.to_string())?
+    .map(|(document, groups)| crate::model::TextDocument { document, groups })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_rules_export_import_round_trip_accepts_project_backup_wrappers() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("openink-rules-test-{}-{}", std::process::id(), stamp));
+        std::fs::create_dir_all(&dir).unwrap();
+        let library = json!({"rules":[{"id":"r1","name":"规则","general":{"vertical":[0,0]},"overrides":[],"first_offset":[0,0],"wave_amplitude":[0,0],"wave_length":[20,20]}],"selected":"r1"});
+        let plain = dir.join("rules.json");
+        export_font_rules(plain.to_string_lossy().into_owned(), library.clone()).unwrap();
+        assert_eq!(import_font_rules(plain.to_string_lossy().into_owned()).unwrap(), library);
+        let wrapped = dir.join("backup.json");
+        std::fs::write(&wrapped, serde_json::to_vec(&json!({"source_project":"a.inkproj","saved_at":"2026-11-14","library":library})).unwrap()).unwrap();
+        assert_eq!(import_font_rules(wrapped.to_string_lossy().into_owned()).unwrap(), library);
+        assert!(import_font_rules(dir.join("missing.json").to_string_lossy().into_owned()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn compare_routes_ipc_and_legacy_pen_depth() {
@@ -810,7 +876,7 @@ mod tests {
     fn font_layout_jitter_preserves_paths_and_repeats_with_seed() {
         let path = Path::new("C:/Windows/Fonts/arial.ttf");
         if !path.exists() { return; }
-        let render = |jitter| layout_font(path, "AAA", 10., 1., 3, 100., 100., false, &ImportOptions::default(), jitter).unwrap();
+        let render = |jitter| layout_font(path, "AAA", 10., 1., None, 3, 100., 100., false, &ImportOptions::default(), jitter).unwrap();
         let plain = render(TextJitter::default());
         let jitter = TextJitter { x_mm:1., y_mm:1., rotation_deg:5., scale_x_percent:10., scale_y_percent:10., scale_percent:10., seed:42, ..Default::default() };
         let a = render(jitter);
@@ -826,6 +892,7 @@ mod tests {
             "永",
             10.,
             1.,
+            None,
             0,
             100.,
             100.,
@@ -839,6 +906,7 @@ mod tests {
             "永",
             10.,
             1.,
+            None,
             20,
             100.,
             100.,

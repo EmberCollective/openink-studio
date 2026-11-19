@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { screenToCanvas, pointerCoordinates, referenceViewSize } from './pointerGeometry.ts';
+import { screenToCanvas, pointerCoordinates, referenceViewSize, editingViewAngle } from './pointerGeometry.ts';
+import { machineScene } from './machineScene.ts';
 
 test('rotated view fits all corners and pointer inverse preserves paper coordinates', () => {
   const width=210,height=297,scale=2.5;
@@ -45,4 +46,18 @@ test('unpositioned coordinates explicitly remain preview', () => {
 });
 test('singular transforms do not create pointer coordinates', () => {
   assert.equal(screenToCanvas({ x: 1, y: 2 }, { a: 0, b: 0, c: 0, d: 1, e: 0, f: 0 }), null);
+});
+
+test('editing view angle only changes display, never the machine placement angle', () => {
+  for (const angle of [0, 90, -90, 180, 37]) {
+    assert.equal(editingViewAngle(angle, false), angle, '关闭转正时维持摆放角度');
+    assert.equal(editingViewAngle(angle, true), 0, '转正后编辑视图为 0°');
+    assert.equal(editingViewAngle(angle, true, true), angle, '纸面定位向导内不转正');
+  }
+  const placement = 90, display = editingViewAngle(placement, true);
+  assert.deepEqual(referenceViewSize(210, 297, display), { width: 234, height: 321 }, '转正后按未旋转页面留 12px 边');
+  const point = { x: 0, y: 0 };
+  const machine = machineScene(210, 297, placement).point(point);
+  assert.ok(Math.abs(machine.x - 253.5) < 1e-8 && Math.abs(machine.y - 43.5) < 1e-8, '机器坐标按摆放角度 90° 计算');
+  assert.notDeepEqual(machineScene(210, 297, display).point(point), machine, '机器映射不得改用编辑显示角度');
 });

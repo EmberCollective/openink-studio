@@ -1,6 +1,6 @@
 import { DraftNumberInput } from "./DraftNumberInput";
 import { assignBatch, batchStatus } from "./batchModel";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import {
   CheckSquare,
   ClipboardPaste,
@@ -20,6 +20,7 @@ import {
   bottomGuideOffset,
   copyPaths,
   deletePaths,
+  groupAt,
   hitStroke,
   movePaths,
   pastePaths,
@@ -31,11 +32,13 @@ import {
   resizeFromHandle,
   rotationFromPointer,
   selectByRectangle,
+  strokesOfSameOwner,
   type Bounds,
   type Drawing,
   type Point,
   type ResizeHandle,
 } from "./editorGeometry";
+import { dedupeSelection, mergeNearbyEnds, sortSelectionForWriting } from "./tidySelection";
 
 function NumericEdit({
   label,
@@ -72,7 +75,10 @@ type Drag = {
   kind: "move" | "box" | "resize" | "rotate";
   document: Drawing;
   selection: number[];
-  append: boolean;
+  mode: "replace" | "add" | "subtract";
+  hit: number | null;
+  /** 点在字的空白处时命中的整字笔画；用于单击选字与加选/减选整字。 */
+  hitIds: number[];
   handle?: ResizeHandle;
   bounds?: Bounds;
   owner: SVGGElement;
@@ -116,6 +122,8 @@ export function useCanvasEditing({
     [clipboard, setClipboard] = useState<Point[][]>([]),
     [proportional, setProportional] = useState(true),
     [angle, setAngle] = useState(0);
+  // 右键菜单：屏幕坐标 + 命中的笔画/整字，方便直接对当前内容操作。
+  const [menu, setMenu] = useState<{ x: number; y: number; hit: number | null; group: number[] } | null>(null);
   const [rotationPreview, setRotationPreview] = useState<{ box: Bounds; angle: number } | null>(null);
   const handlesRef = useRef<SVGGElement | null>(null);
   const [screenUnit, setScreenUnit] = useState(0.5);
@@ -219,6 +227,22 @@ export function useCanvasEditing({
     commit(next.document, next.selection);
     onMessage(`已粘贴 ${next.selection.length} 条路径，可直接拖动定位`);
   }
+  function duplicate() {
+    if (!document || locked || extracting || !selection.length) return;
+    if (pasteBatch && batchStatus(document, pasteBatch, writtenIds || new Set()) === "已完成") { onMessage("当前批次已完成，请在线路中新建批次后复制"); return; }
+    const groups = document.strokeGroups;
+    const copied = selection.map(i => groups?.[i]);
+    const next = pastePaths(document, copyPaths(document, selection), { x: 3, y: 3 });
+    // 复制文字时沿用原字的字符分组，双击仍只选一个字。
+    if (groups && groups.length === document.strokes.length && copied.every(g => g !== undefined)) {
+      const max = groups.reduce((m, g) => Math.max(m, g), 0);
+      const remap = new Map<number, number>();
+      next.document = { ...next.document, strokeGroups: [...groups, ...copied.map(g => { if (!remap.has(g!)) remap.set(g!, max + remap.size + 1); return remap.get(g!)!; })] };
+    }
+    if (pasteBatch) next.document = assignBatch(next.document, next.selection, pasteBatch);
+    commit(next.document, next.selection);
+    onMessage(`已复制 ${next.selection.length} 条路径，可直接拖动定位`);
+  }
   function all() {
     if (document) {
       setSelection(document.strokes.map((_, i) => i));
@@ -236,7 +260,6 @@ export function useCanvasEditing({
         target.closest(
           "input,textarea,select,[contenteditable=true],[role=dialog],[data-registration-handle]",
         ) ||
-        !canvasFocused.current ||
         locked ||
         extracting ||
         !document
@@ -244,6 +267,9 @@ export function useCanvasEditing({
         return;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
+      // 不必先点画布：没有选区时只放行带修饰键的全局命令；有选区时删除、
+      // 方向键等直接生效。否则点过侧栏按钮后快捷键就“失灵”，用起来很别扭。
+      if (!canvasFocused.current && !selection.length && !mod) return;
       if (mod && key === "a") {
         e.preventDefault();
         all();
@@ -262,6 +288,9 @@ export function useCanvasEditing({
       } else if (mod && key === "y") {
         e.preventDefault();
         redo();
+      } else if (mod && key === "d") {
+        e.preventDefault();
+        duplicate();
       } else if (key === "delete" || key === "backspace") {
         e.preventDefault();
         remove();
@@ -273,7 +302,7 @@ export function useCanvasEditing({
         selection.length
       ) {
         e.preventDefault();
-        const step = e.shiftKey ? 5 : 1;
+        const step = e.altKey ? 0.1 : e.shiftKey ? 5 : 1;
         commit(
           movePaths(
             document,
@@ -294,7 +323,7 @@ export function useCanvasEditing({
       window.removeEventListener("pointerdown", outside);
     };
   });
-  function point(e: PointerEvent<SVGGElement>): Point {
+  function point(e: { clientX: number; clientY: number; currentTarget: SVGGElement }): Point {
     const svg = e.currentTarget.ownerSVGElement!;
     const ctm = svg.getScreenCTM?.();
     if (ctm) {
@@ -320,32 +349,27 @@ export function useCanvasEditing({
       matrix = svg.getScreenCTM?.(),
       tolerance = matrix ? 4 / Math.max(.001, Math.hypot(matrix.a, matrix.b)) : 4 * svg.viewBox.baseVal.width / svg.getBoundingClientRect().width;
     const hit = hitStroke(document, p, tolerance);
+    // 点在笔画之间的空白处时，按字的外框兜底命中，避免“必须正好点在笔画上”。
+    const groupHit = hit === null ? groupAt(document, p, tolerance) : null;
+    const groupIds = groupHit === null ? [] : strokesOfSameOwner(document, groupHit);
     const inside =
       box &&
       p.x >= box.x &&
       p.x <= box.x + box.width &&
       p.y >= box.y &&
       p.y <= box.y + box.height;
+    // 无修饰键：点中笔画只选这一笔；点在字的空白处直接选中整字。
+    // Shift/Alt：先进入框选，松手时按移动距离区分「单击加/减」还是「框选加/减」。
+    // 无修饰键：点中笔画只选这一笔；点在字的空白处直接选中整字。
+    // Shift / Alt：加选 / 减选，拖拽框选同样适用。
+    const mode = e.altKey ? "subtract" as const : e.shiftKey ? "add" as const : "replace" as const;
     let ids = selection;
     let kind: "move" | "box" = "box";
-    if (e.shiftKey) {
-      if (hit !== null) {
-        setSelection(
-          selected.has(hit)
-            ? selection.filter((i) => i !== hit)
-            : [...selection, hit],
-        );
-        return;
-      }
-    } else if (inside && selection.length) {
-      kind = "move";
-    } else if (hit !== null) {
-      ids = [hit];
-      setSelection(ids);
-      kind = "move";
-    } else {
-      setSelection([]);
-      ids = [];
+    if (mode === "replace") {
+      if (inside && selection.length && (hit === null || selection.includes(hit))) kind = "move";
+      else if (hit !== null) { ids = [hit]; setSelection(ids); kind = "move"; }
+      else if (groupIds.length) { ids = groupIds; setSelection(ids); kind = "move"; }
+      else { setSelection([]); ids = []; }
     }
     drag.current = {
       start: p,
@@ -353,7 +377,9 @@ export function useCanvasEditing({
       kind,
       document,
       selection: ids,
-      append: e.shiftKey,
+      mode,
+      hit,
+      hitIds: groupIds,
       owner: e.currentTarget,
       pointerId: e.pointerId,
     };
@@ -410,10 +436,98 @@ export function useCanvasEditing({
           d.selection,
         );
     } else {
-      const ids = selectByRectangle(d.document, rectangle(d.start, p));
-      setSelection(d.append ? [...new Set([...d.selection, ...ids])] : ids);
+      const travel = Math.hypot(p.x - d.start.x, p.y - d.start.y);
+      if (travel < 1.) {
+        // 修饰键下的单击：点在笔画上改单笔，点在字的空白处改整字。
+        const clicked = d.hit !== null ? [d.hit] : d.hitIds;
+        if (d.mode === "add") {
+          if (clicked.length) setSelection([...new Set([...d.selection, ...clicked])]);
+        } else if (d.mode === "subtract") {
+          if (clicked.length) setSelection(d.selection.filter((i) => !clicked.includes(i)));
+        } else if (d.mode === "replace") {
+          setSelection(clicked);
+        }
+      } else {
+        const ids = selectByRectangle(d.document, rectangle(d.start, p));
+        if (d.mode === "add") setSelection([...new Set([...d.selection, ...ids])]);
+        else if (d.mode === "subtract") setSelection(d.selection.filter((i) => !ids.includes(i)));
+        else setSelection(ids);
+      }
     }
     if (d.owner.hasPointerCapture(e.pointerId)) d.owner.releasePointerCapture(e.pointerId);
+  }
+  function doubleClick(e: MouseEvent<SVGGElement>) {
+    if (!active || lockedRef.current || !document || !box) return;
+    const p = point(e);
+    const matrix = e.currentTarget.ownerSVGElement?.getScreenCTM?.();
+    const tolerance = matrix ? 4 / Math.max(.001, Math.hypot(matrix.a, matrix.b)) : 1;
+    const hit = hitStroke(document, p, tolerance) ?? groupAt(document, p, tolerance);
+    if (hit === null) return;
+    const ids = strokesOfSameOwner(document, hit);
+    if (ids.length <= 1) { setSelection([hit]); return; }
+    setSelection(e.shiftKey ? [...new Set([...selection, ...ids])] : ids);
+    const groups = document.strokeGroups;
+    const oneCharacter = groups && groups.length === document.strokes.length && ids.every((i) => groups[i] === groups[hit]);
+    onMessage(oneCharacter ? `已选中 1 个字 · ${ids.length} 条笔画` : `已选中同一素材的 ${ids.length} 条笔画`);
+  }
+  function contextMenu(e: MouseEvent<SVGGElement>) {
+    if (!active || !document) return;
+    e.preventDefault();
+    e.stopPropagation();
+    canvasFocused.current = true;
+    const p = point(e);
+    const matrix = e.currentTarget.ownerSVGElement?.getScreenCTM?.();
+    const tolerance = matrix ? 6 / Math.max(.001, Math.hypot(matrix.a, matrix.b)) : 1;
+    const hit = hitStroke(document, p, tolerance) ?? groupAt(document, p, tolerance);
+    const group = hit === null ? [] : strokesOfSameOwner(document, hit);
+    // 右键默认把命中的字一起选中；菜单里可以再改成“只选这一笔”。
+    if (hit !== null && !selection.includes(hit)) setSelection(group.length ? group : [hit]);
+    setMenu({
+      x: Math.max(8, Math.min(e.clientX, window.innerWidth - 200)),
+      y: Math.max(8, Math.min(e.clientY, window.innerHeight - 330)),
+      hit,
+      group,
+    });
+  }
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") setMenu(null); };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("wheel", close, { passive: true });
+    window.addEventListener("keydown", key);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("wheel", close);
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("resize", close);
+    };
+  }, [menu]);
+  function tidySort() {
+    if (!document || lockedRef.current || extracting) return;
+    const result = sortSelectionForWriting(document, selection);
+    if (result.doc === document) { onMessage("选区已经是书写顺序"); return; }
+    commit(result.doc, selection);
+    onMessage(`已按书写顺序整理 ${selection.length} 条笔画（上→下、左→右）`);
+  }
+  function tidyMerge() {
+    if (!document || lockedRef.current || extracting) return;
+    try {
+      const result = mergeNearbyEnds(document, selection, 0.6, writtenIds ?? new Set());
+      if (!result.merged) { onMessage("没有端点距离在 0.6mm 内、可以拼接的笔画"); return; }
+      commit(result.doc, result.selection);
+      onMessage(`已拼接 ${result.merged} 处断笔，选区剩 ${result.selection.length} 条`);
+    } catch (error) {
+      onMessage(String(error));
+    }
+  }
+  function tidyDedupe() {
+    if (!document || lockedRef.current || extracting) return;
+    const result = dedupeSelection(document, selection);
+    if (!result.removed) { onMessage("没有发现逐点重合的重复笔画"); return; }
+    commit(result.doc, result.selection);
+    onMessage(`已删除 ${result.removed} 条重复笔画`);
   }
   function handleDown(e: PointerEvent<SVGGElement>, handle?: ResizeHandle) {
     if (!active || lockedRef.current || !document || !box || e.button !== 0 || drag.current) return;
@@ -422,7 +536,7 @@ export function useCanvasEditing({
     canvasFocused.current = true;
     (window.document.activeElement as HTMLElement)?.blur();
     const p = point(e);
-    drag.current = { start: p, current: p, kind: handle ? "resize" : "rotate", document, selection: [...selection], append: false, handle, bounds: box, owner: e.currentTarget, pointerId: e.pointerId };
+    drag.current = { start: p, current: p, kind: handle ? "resize" : "rotate", document, selection: [...selection], mode: "replace" as const, hit: null, hitIds: [], handle, bounds: box, owner: e.currentTarget, pointerId: e.pointerId };
     e.currentTarget.setPointerCapture(e.pointerId);
   }
   const lineShapes = useMemo(
@@ -446,6 +560,8 @@ export function useCanvasEditing({
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}
+      onDoubleClick={doubleClick}
+      onContextMenu={contextMenu}
       onPointerCancel={cancelDrag}
       onLostPointerCapture={cancelDrag}
       style={{ touchAction: active ? "none" : "auto" }}
@@ -530,12 +646,44 @@ export function useCanvasEditing({
                 ? "作业进行中，编辑已锁定"
                 : selection.length
                   ? `已选 ${selection.length} 条完整路径`
-                  : "直接在白纸拖框选择；拖动选区移动，Shift 追加"}
+                  : "直接在白纸拖框选择；单击字的空白处选整字，Shift 加选、Alt 减选"}
           </span>
         </>
       )}
     </div>
   );
+  const contextMenuView = (() => {
+    if (!menu) return null;
+    const m = menu;
+    const act = (action: () => void) => () => { setMenu(null); action(); };
+    return (
+      <div
+        className="context-menu"
+        role="menu"
+        style={{ left: m.x, top: m.y }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        {m.hit !== null && <button role="menuitem" onClick={act(() => setSelection([m.hit!]))}>只选这一笔</button>}
+        {m.group.length > 1 && <button role="menuitem" onClick={act(() => setSelection(m.group))}>选中整字（{m.group.length} 笔）</button>}
+        {(m.hit !== null || m.group.length > 1) && <hr />}
+        <button role="menuitem" disabled={!selection.length} onClick={act(copy)}>复制<kbd>Ctrl+C</kbd></button>
+        <button role="menuitem" disabled={!selection.length} onClick={act(cut)}>剪切<kbd>Ctrl+X</kbd></button>
+        <button role="menuitem" disabled={!clipboard.length} onClick={act(paste)}>粘贴<kbd>Ctrl+V</kbd></button>
+        <button role="menuitem" disabled={!selection.length} onClick={act(duplicate)}>原位复制<kbd>Ctrl+D</kbd></button>
+        <button role="menuitem" disabled={!selection.length} onClick={act(remove)}>删除<kbd>Delete</kbd></button>
+        <hr />
+        <button role="menuitem" disabled={!document?.strokes.length} onClick={act(all)}>全选<kbd>Ctrl+A</kbd></button>
+        {selection.length > 0 && <>
+          <button role="menuitem" disabled={selection.length < 2 || locked || extracting} onClick={act(tidySort)}>整理：按书写顺序排序</button>
+          <button role="menuitem" disabled={locked || extracting} onClick={act(tidyMerge)}>整理：拼接近端点</button>
+          <button role="menuitem" disabled={locked || extracting} onClick={act(tidyDedupe)}>整理：删除重复笔画</button>
+        </>}
+        {onResetWritten && selection.some((index) => writtenIds?.has(document?.strokeIds?.[index] || "")) && <button role="menuitem" onClick={act(() => onResetWritten(selection))}>重置书写标记</button>}
+        <button role="menuitem" disabled={!selection.length} onClick={act(() => setSelection([]))}>取消选择<kbd>Esc</kbd></button>
+      </div>
+    );
+  })();
   const historyToolbar = <div className="history-tools" role="group" aria-label="编辑历史">
     <button className="icon-button" title="撤销 Ctrl+Z" disabled={!history.length || locked || extracting} onClick={undo}><Undo2 size={16} /><span>撤销</span></button>
     <button className="icon-button" title="重做 Ctrl+Shift+Z" disabled={!future.length || locked || extracting} onClick={redo}><Redo2 size={16} /><span>重做</span></button>
@@ -664,6 +812,7 @@ export function useCanvasEditing({
     layer,
     handles,
     toolbar,
+    contextMenu: contextMenuView,
     historyToolbar,
     inspector,
     displayDocument: visible,

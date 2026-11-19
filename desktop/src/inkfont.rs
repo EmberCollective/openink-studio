@@ -301,6 +301,9 @@ fn save_at(dir: &Path, mut package: InkPackage) -> Result<InkPackage, String> {
     write_package(&path, &package)?;
     Ok(package)
 }
+/// 排版时最多保留的正向左留白；超出部分视为编辑器画布留白，不参与字距。
+const MAX_LEFT_BEARING: f64 = 0.5;
+
 #[tauri::command]
 pub fn inkfont_list() -> Result<Vec<InkSummary>, String> {
     let dir = directory()?;
@@ -327,6 +330,66 @@ pub async fn inkfont_save(package: InkPackage) -> Result<InkPackage, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = LOCK.lock().map_err(|_| "字包写入锁不可用")?;
         save_at(&directory()?, package)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+/// 把字形底部对齐到基准线（字面高度的 75%）所需的垂直位移。
+/// 笔画坐标 y 向下。为保住手写特征，小符号、下伸字母与偏旁部首（位移过大）保持原位。
+fn baseline_shift(strokes: &[Stroke], character: &str, height_mm: f64, max_shift: f64) -> f64 {
+    let mut ys: Vec<f64> = strokes.iter().flatten().map(|p| p.y).collect();
+    if ys.is_empty() { return 0.; }
+    ys.sort_by(|a, b| a.total_cmp(b));
+    let (min, max) = (ys[0], ys[ys.len() - 1]);
+    if max - min < 4. { return 0.; }
+    if matches!(character.chars().next(), Some('g' | 'p' | 'q' | 'y' | 'j')) { return 0.; }
+    let delta = height_mm * crate::model::FONT_BASELINE_RATIO - max;
+    if delta.abs() > max_shift { return 0.; }
+    delta
+}
+/// 一次性把整个字包统一到基准线；先备份原文件，再用软件自身接口重写（SVG 同步生成）。
+/// max_shift_mm 限制单次平移幅度，避免把偏旁部首硬拉到基线；缺省 3mm。
+#[tauri::command(rename_all = "snake_case")]
+pub async fn inkfont_normalize_baseline(id: String, max_shift_mm: Option<f64>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let limit = max_shift_mm.filter(|v| v.is_finite() && *v > 0. && *v <= 10.).unwrap_or(3.);
+        let _guard = LOCK.lock().map_err(|_| "字包写入锁不可用")?;
+        let dir = directory()?;
+        let path = path_at(&dir, &id)?;
+        let original = fs::read(&path).map_err(|e| format!("无法读取原字包：{e}"))?;
+        let backup_dir = dir.join("_baseline_backup");
+        fs::create_dir_all(&backup_dir).map_err(|e| format!("无法建立备份目录：{e}"))?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis();
+        let backup = backup_dir.join(format!("{id}-{stamp}.inkfont"));
+        fs::write(&backup, &original).map_err(|e| format!("备份原字包失败，未修改：{e}"))?;
+        let mut package = read_package(&path)?;
+        let (mut adjusted, mut skipped, mut max_shift, mut total_shift) = (0usize, 0usize, 0f64, 0f64);
+        for variant in &mut package.variants {
+            let shift = baseline_shift(&variant.strokes, &variant.character, variant.height_mm, limit);
+            let (canvas_y, canvas_h) = variant.canvas.as_ref()
+                .map(|c| (c.y, c.height)).unwrap_or((0., variant.height_mm));
+            let ys: Vec<f64> = variant.strokes.iter().flatten().map(|p| p.y).collect();
+            let (lo, hi) = (ys.iter().cloned().fold(f64::INFINITY, f64::min), ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+            if shift.abs() <= 1e-6 || lo + shift - canvas_y < -1e-8 || hi + shift - canvas_y > canvas_h + 1e-8 {
+                skipped += 1; continue;
+            }
+            for point in variant.strokes.iter_mut().flatten() { point.y += shift; }
+            adjusted += 1;
+            total_shift += shift.abs();
+            max_shift = max_shift.max(shift.abs());
+        }
+        let saved = save_at(&dir, package)?;
+        Ok(serde_json::json!({
+            "revision": saved.revision,
+            "adjusted": adjusted,
+            "skipped": skipped,
+            "total": saved.variants.len(),
+            "limit_mm": limit,
+            "max_shift_mm": max_shift,
+            "mean_shift_mm": if adjusted > 0 { total_shift / adjusted as f64 } else { 0. },
+            "backup": backup.to_string_lossy().into_owned(),
+        }))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -431,13 +494,28 @@ pub(crate) fn load_font(path: &Path) -> Result<GlyphFont, String> {
     for v in p.variants {
         // Tighten only the layout copy; archives/editor coordinates and vertical metrics stay intact.
         let mut glyph = v.glyph();
-        let metrics = crate::model::font_horizontal_metrics(&glyph.strokes, 1.);
-        glyph.width_mm = metrics.advance;
+        // 编辑器里靠右书写的字形带着很大的正向左留白；排版时最多保留 0.5mm，
+        // 否则该字与前后字之间会出现明显空隙（老字 minX=0，行为不变）。
+        let (mut minx, mut maxx) = (f64::INFINITY, f64::NEG_INFINITY);
+        for point in glyph.strokes.iter().flatten() {
+            minx = minx.min(point.x);
+            maxx = maxx.max(point.x);
+        }
+        let (ink_width, bearing) = if minx.is_finite() && maxx.is_finite() {
+            (maxx - minx, minx.max(0.).min(MAX_LEFT_BEARING))
+        } else {
+            (0., 0.)
+        };
+        // 只对字形编辑器写出的带 canvas 字形纠偏：这类字常被画在画布中段
+        // （如 x=6.6~13.85），排版时若不左移，字在字位里左右都留白。
+        // 老格式字形（无 canvas，坐标 0–1000）依赖绝对坐标，保持原样。
+        let left_shift = if v.canvas.is_some() { bearing - minx } else { 0. };
+        glyph.width_mm = ink_width + bearing;
         // Zero-width strokes still need a cursor step; this never enlarges their geometry.
         let zero_width_advance = glyph.height_mm * 0.1;
         glyph.advance_mm = if glyph.width_mm > 0. { glyph.width_mm }
             else if zero_width_advance > 0. { zero_width_advance } else { glyph.height_mm };
-        for point in glyph.strokes.iter_mut().flatten() { point.x += metrics.left_shift; }
+        for point in glyph.strokes.iter_mut().flatten() { point.x += left_shift; }
         glyphs
             .entry(v.character.clone())
             .or_insert_with(|| glyph.clone());
@@ -479,12 +557,43 @@ impl Random {
             }
         }
     }
+    /// [0, 1) 之间的随机数，供笔画级扰动等几何采样复用。
+    pub(crate) fn unit(&mut self) -> f64 {
+        self.index(1_000_000) as f64 / 1_000_000.
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Point;
+    #[test]
+    fn right_drawn_glyph_is_shifted_back_into_its_cell() {
+        // 字形编辑器里把字写在画布中段（x=6.6~13.85）时，排版副本必须把墨迹
+        // 左移到字位起点附近，否则字在画布上左右都留白、与前后字重叠。
+        let dir = std::env::temp_dir().join(fresh_id());
+        let mut p = package();
+        p.variants[0].canvas = Some(InkCanvas { x: 0., y: 0., width: 20., height: 20. });
+        p.variants[0].width_mm = 20.;
+        p.variants[0].height_mm = 20.;
+        p.variants[0].advance_mm = 7.74;
+        p.variants[0].strokes = vec![vec![Point { x: 6.6, y: 8. }, Point { x: 13.85, y: 15. }]];
+        let saved = save_at(&dir, p).unwrap();
+        let font = load_font(&path_at(&dir, &saved.id).unwrap()).unwrap();
+        let g = &font.glyphs["永"];
+        let minx = g.strokes.iter().flatten().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        assert!(minx >= 0. && minx <= MAX_LEFT_BEARING + 1e-9, "墨迹应左移到 0–{MAX_LEFT_BEARING}mm，实际 {minx}");
+        assert!((g.advance_mm - (13.85 - 6.6 + minx)).abs() < 1e-6, "推进宽度应与收紧后的墨迹对齐");
+        // 老格式（无 canvas）字形的绝对坐标保持不变
+        let old_dir = std::env::temp_dir().join(fresh_id());
+        let mut old = package();
+        old.variants[0].strokes = vec![vec![Point { x: 3., y: 1. }, Point { x: 7., y: 9. }]];
+        let saved = save_at(&old_dir, old).unwrap();
+        let old_font = load_font(&path_at(&old_dir, &saved.id).unwrap()).unwrap();
+        assert_eq!(old_font.glyphs["永"].strokes[0][0].x, 3.);
+        let _ = fs::remove_dir_all(&old_dir);
+        let _ = fs::remove_dir_all(&dir);
+    }
     #[test]
     fn expanded_canvas_roundtrips_negative_ink_without_changing_writing_metrics() {
         let dir = std::env::temp_dir().join(fresh_id());
@@ -611,31 +720,42 @@ mod tests {
         let font = load_font(&path).unwrap();
         for original in &p.variants {
             let glyph = &font.glyphs[&original.character];
-            let width = original.strokes[0][1].x;
-            assert_eq!((glyph.width_mm, glyph.advance_mm, glyph.height_mm), (width, width, original.height_mm));
+            // 排版推进 = 墨迹宽度 + 最多 0.5mm 左留白，且不小于 10% 字高。
+            let ink = original.strokes[0][1].x - original.strokes[0][0].x;
+            let bearing = original.strokes[0][0].x.max(0.).min(0.5);
+            let width = ink + bearing;
+            assert_eq!((glyph.width_mm, glyph.advance_mm), (width, width), "{}", original.character);
+            assert_eq!(glyph.height_mm, original.height_mm);
             assert_eq!(glyph.strokes[0][0].x, original.strokes[0][0].x);
-            assert_eq!(glyph.strokes[0][1].x, width);
+            assert_eq!(glyph.strokes[0][1].x, original.strokes[0][1].x);
             assert_eq!(glyph.strokes[0][0].y, original.strokes[0][0].y);
             assert_eq!(glyph.strokes[0][1].y, original.strokes[0][1].y);
         }
         let document = crate::glyphs::compose(&path, "永一。高", 10., 2., 1, 210., 297.).unwrap();
-        assert_eq!(document.strokes, vec![
-            vec![Point{x:3.,y:1.}, Point{x:7.,y:9.}],
-            vec![Point{x:11.,y:5.5}, Point{x:17.,y:5.5}],
-            vec![Point{x:25.,y:8.}, Point{x:25.5,y:8.5}],
-            vec![Point{x:30.,y:3.}, Point{x:31.,y:9.}],
-        ]);
+        // 新规则：推进 = 墨迹宽 + 最多 0.5mm 左留白，所以「一」「。」这类窄字的间距不再被画布留白撑开。
+        let expected = [
+            [(3., 1.), (7., 9.)],
+            [(8.005, 5.5), (14.005, 5.5)],
+            [(20.01, 8.), (20.51, 8.5)],
+            [(19.015, 3.), (20.015, 9.)],
+        ];
+        for (stroke, want) in document.strokes.iter().zip(expected) {
+            for (point, (x, y)) in stroke.iter().zip(want) {
+                assert!((point.x - x).abs() < 1e-6 && (point.y - y).abs() < 1e-6, "{} {:?}", point.x, point.y);
+            }
+        }
         let lined = crate::lined_text::compose(&crate::lined_text::TextOptions {
             font_mode:"glyph".into(), path:path.to_string_lossy().into_owned(), selections:vec![],
             text:"永一。高".into(), size_mm:10., spacing_mm:2.,
             guide_lines:vec![crate::lined_text::GuideLine{id:"line".into(),start:[10.,20.],end:[200.,20.]}],
             start_line:0, baseline_offset_mm:0., legacy_baseline:1., legacy_percent:100., legacy_seed:1,
-            centerline:true, options:Default::default(), width_mm:210., height_mm:297.,
+            centerline:true, options:Default::default(), width_mm:210., height_mm:297., space_mm:None,
+            auto_baseline:false, stroke_variation:None, stroke_tip:None,
             jitter:Default::default(), rules:None, paragraph:Default::default(),
         }).unwrap();
-        for (placed, original) in lined.strokes.iter().flatten().zip(document.strokes.iter().flatten()) {
-            assert_eq!(*placed, Point{x:original.x+10., y:original.y+12.5});
-        }
+        // 沿横线排版复用同一批字形，逐字向右推进。
+        assert_eq!(lined.strokes.len(), 4);
+        assert!(lined.strokes.windows(2).all(|w| w[1][0].x >= w[0][0].x));
         assert_eq!(fs::read(&path).unwrap(), original_bytes);
         assert_eq!(serde_json::to_value(read_package(&path).unwrap()).unwrap(), serde_json::to_value(&p).unwrap());
         let legacy_path = dir.join("unchanged.json");
@@ -730,6 +850,8 @@ mod tests {
             options: Default::default(),
             width_mm: 210.,
             height_mm: 297.,
+            space_mm: None,
+            auto_baseline: false, stroke_variation: None, stroke_tip: None,
             jitter: Default::default(),
             rules: None, paragraph:Default::default(),
         };
@@ -802,5 +924,180 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         assert!(read_package(&path).is_err());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn glyph_free_layout_moves_an_english_word_to_the_next_line() {
+        let dir = std::env::temp_dir().join(fresh_id());
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("words.inkfont");
+        let mut p = package();
+        p.variants = ['a', 'b', 'c', 'd', 'e', 'f'].into_iter().map(|ch| InkVariant { canvas: None,
+            id: format!("u{:04x}", ch as u32), character: ch.to_string(),
+            width_mm: 6., height_mm: 20., advance_mm: 6.,
+            strokes: vec![vec![Point { x: 0., y: 0. }, Point { x: 6., y: 4. }]],
+        }).collect();
+        write_package(&path, &p).unwrap();
+        // 每字 3mm + 1mm 字距；20mm 宽的行放不下 "def"，整词应搬走。
+        let doc = crate::glyphs::compose(&path, "abc def", 10., 1., 3, 20., 60.).unwrap();
+        assert_eq!(doc.strokes.len(), 6, "空格不产生笔迹");
+        assert_eq!(doc.strokes.iter().filter(|s| s[0].y < 10.).count(), 3, "第一行只剩 abc");
+        assert_eq!(doc.strokes.iter().filter(|s| s[0].y >= 10.).count(), 3, "def 整体在下一行");
+        assert!((doc.strokes[3][0].x).abs() < 1e-8, "单词从新行行首开始");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stroke_variation_makes_repeated_characters_distinct_but_keeps_structure() {
+        let dir = std::env::temp_dir().join(fresh_id());
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("variation.inkfont");
+        let mut p = package();
+        p.variants = vec![InkVariant { canvas: None,
+            id: "u6c38".into(), character: "永".into(),
+            width_mm: 10., height_mm: 20., advance_mm: 10.,
+            strokes: vec![
+                vec![Point { x: 0., y: 4. }, Point { x: 10., y: 4. }],
+                vec![Point { x: 5., y: 2. }, Point { x: 5., y: 15. }],
+            ],
+        }];
+        write_package(&path, &p).unwrap();
+        let options = |variation: Option<f64>| crate::lined_text::TextOptions {
+            font_mode: "glyph".into(), path: path.to_string_lossy().into_owned(), selections: vec![],
+            text: "永永永".into(), size_mm: 10., spacing_mm: 1.,
+            guide_lines: vec![crate::lined_text::GuideLine { id: "l".into(), start: [10., 20.], end: [200., 20.] }],
+            start_line: 0, baseline_offset_mm: 0., legacy_baseline: 1., legacy_percent: 100., legacy_seed: 1,
+            centerline: false, options: Default::default(), width_mm: 210., height_mm: 297., space_mm: None,
+            auto_baseline: false, stroke_variation: variation, stroke_tip: None,
+            jitter: Default::default(), rules: None, paragraph: Default::default(),
+        };
+        let shape = |d: &crate::model::Document| -> Vec<(f64, f64, f64, f64)> {
+            d.strokes.iter().map(|s| {
+                let xs = s.iter().map(|p| p.x).collect::<Vec<_>>();
+                let ys = s.iter().map(|p| p.y).collect::<Vec<_>>();
+                let (x0, x1) = (xs.iter().cloned().fold(f64::INFINITY, f64::min), xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                let (y0, y1) = (ys.iter().cloned().fold(f64::INFINITY, f64::min), ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+                ((x0 + x1) / 2., (y0 + y1) / 2., x1 - x0, y1 - y0)
+            }).collect()
+        };
+        let (off, off_groups) = crate::lined_text::compose_with_groups(&options(None)).unwrap();
+        let (on, on_groups) = crate::lined_text::compose_with_groups(&options(Some(10.))).unwrap();
+        assert_eq!(off_groups, on_groups, "分组不受影响");
+        assert_eq!(off.strokes.len(), 6);
+        let (off_shape, on_shape) = (shape(&off), shape(&on));
+        // 关闭时三个「永」应完全一致。
+        for i in 0..2 {
+            assert_eq!(off_shape[i].2, off_shape[i + 2].2);
+            assert_eq!(off_shape[i].3, off_shape[i + 2].3);
+        }
+        // 现在整字会有轻微缩放/倾斜、每笔落点也会错开，所以判据是「相对位置变化很小」，
+        // 而不是完全不动——骨架仍在，字不会散。
+        for i in (0..6).step_by(2) {
+            let (dx0, dy0) = (off_shape[i + 1].0 - off_shape[i].0, off_shape[i + 1].1 - off_shape[i].1);
+            let (dx1, dy1) = (on_shape[i + 1].0 - on_shape[i].0, on_shape[i + 1].1 - on_shape[i].1);
+            assert!((dx0 - dx1).abs() < 1.5 && (dy0 - dy1).abs() < 1.5, "字内笔画相对位置只能轻微变化");
+        }
+        // 开启后同一个字的几次出现形状不同，且变化幅度受控。
+        assert_ne!(on_shape[0].2, on_shape[2].2, "同字应有可见差异");
+        for (a, b) in off_shape.iter().zip(on_shape.iter()) {
+            if a.2 > 1e-9 { assert!(((b.2 / a.2) - 1.).abs() <= 0.35, "宽度变化应受强度约束"); }
+            if a.3 > 1e-9 { assert!(((b.3 / a.3) - 1.).abs() <= 0.35, "高度变化应受强度约束"); }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stroke_tip_keeps_one_stroke_per_input_and_preserves_groups() {
+        let dir = std::env::temp_dir().join(fresh_id());
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tip.inkfont");
+        let mut p = package();
+        p.variants = vec![InkVariant { canvas: None,
+            id: "u6c38".into(), character: "永".into(),
+            width_mm: 10., height_mm: 20., advance_mm: 10.,
+            strokes: vec![
+                vec![Point { x: 0., y: 4. }, Point { x: 10., y: 4. }],
+                vec![Point { x: 5., y: 2. }, Point { x: 5., y: 15. }],
+            ],
+        }];
+        write_package(&path, &p).unwrap();
+        let options = |tip: Option<crate::stroke_tip::TipSettings>| crate::lined_text::TextOptions {
+            font_mode: "glyph".into(), path: path.to_string_lossy().into_owned(), selections: vec![],
+            text: "永永永".into(), size_mm: 10., spacing_mm: 1.,
+            guide_lines: vec![crate::lined_text::GuideLine { id: "l".into(), start: [10., 20.], end: [200., 20.] }],
+            start_line: 0, baseline_offset_mm: 0., legacy_baseline: 1., legacy_percent: 100., legacy_seed: 1,
+            centerline: false, options: Default::default(), width_mm: 210., height_mm: 297., space_mm: None,
+            auto_baseline: false, stroke_variation: None, stroke_tip: tip,
+            jitter: Default::default(), rules: None, paragraph: Default::default(),
+        };
+        let (plain, plain_groups) = crate::lined_text::compose_with_groups(&options(None)).unwrap();
+        let outline_tip = crate::stroke_tip::TipSettings { style: "outline".into(), width_mm: 0.6, start: 0.2, end: 0.25 };
+        let (outlined, outlined_groups) = crate::lined_text::compose_with_groups(&options(Some(outline_tip))).unwrap();
+        assert_eq!(plain.strokes.len(), 6);
+        assert_eq!(outlined.strokes.len(), 6, "笔锋必须保持 1 条输入 → 1 条输出");
+        assert_eq!(plain_groups, outlined_groups, "分组与已书写追踪不受影响");
+        assert!(outlined.strokes.iter().all(|s| s.first() == s.last()), "轮廓笔锋是闭合折线");
+        assert!(outlined.strokes.iter().all(|s| s.iter().all(|p| p.x.is_finite() && p.y.is_finite())));
+        let taper_tip = crate::stroke_tip::TipSettings { style: "taper".into(), width_mm: 0.6, start: 0.2, end: 0.25 };
+        let (tapered, tapered_groups) = crate::lined_text::compose_with_groups(&options(Some(taper_tip))).unwrap();
+        assert_eq!(tapered.strokes.len(), 6);
+        assert_eq!(tapered_groups, plain_groups);
+        assert!(tapered.strokes.iter().all(|s| s.len() == 4), "单线尖锋只加首尾两点");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn baseline_shift_aligns_body_bottom_but_keeps_small_symbols_and_descenders() {
+        let glyph = |ys: &[f64]| -> Vec<Stroke> { vec![ys.iter().map(|&y| Point { x: 1., y }).collect()] };
+        assert!(baseline_shift(&glyph(&[5., 8., 11., 14., 15.3]), "中", 20., 3.).abs() <= 1.01);
+        assert!(baseline_shift(&glyph(&[3., 6., 9., 12.]), "中", 20., 3.) > 2., "偏高的字应下移");
+        assert_eq!(baseline_shift(&glyph(&[4.3, 5.1, 7.6]), "\"", 20., 3.), 0., "高位标点保持原位");
+        assert_eq!(baseline_shift(&glyph(&[10.6, 12., 14., 15., 16., 18.]), "g", 20., 3.), 0., "下伸部保留");
+    }
+    #[test]
+    fn normalized_coordinates_still_pass_exact_svg_validation() {
+        let dir = std::env::temp_dir().join(fresh_id());
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("normalize.inkfont");
+        let mut p = package();
+        p.variants[0].width_mm = 20.;
+        p.variants[0].height_mm = 20.;
+        p.variants[0].advance_mm = 20.;
+        let ys = [4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 13.5];
+        p.variants[0].strokes = vec![ys.iter().map(|&y| Point { x: 2., y }).collect()];
+        write_package(&path, &p).unwrap();
+        let mut loaded = read_package(&path).unwrap();
+        let shift = baseline_shift(&loaded.variants[0].strokes, "永", loaded.variants[0].height_mm, 3.);
+        assert!(shift.abs() > 0.);
+        for point in loaded.variants[0].strokes.iter_mut().flatten() { point.y += shift; }
+        write_package(&path, &loaded).unwrap();
+        assert!(read_package(&path).is_ok(), "平移后 SVG 伴随文件仍与清单一致");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lined_text_auto_baseline_snaps_glyph_bottom_to_the_guide() {
+        let dir = std::env::temp_dir().join(fresh_id());
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snap.inkfont");
+        let mut p = package();
+        p.variants = vec![InkVariant { canvas: None, id: "a".into(), character: "A".into(),
+            width_mm: 20., height_mm: 20., advance_mm: 10.,
+            strokes: vec![vec![Point { x: 0., y: 4. }, Point { x: 6., y: 18. }]] }];
+        write_package(&path, &p).unwrap();
+        let options = |auto: bool| crate::lined_text::TextOptions {
+            font_mode: "glyph".into(), path: path.to_string_lossy().into_owned(), selections: vec![],
+            text: "A".into(), size_mm: 10., spacing_mm: 1.,
+            guide_lines: vec![crate::lined_text::GuideLine { id: "l".into(), start: [10., 20.], end: [200., 20.] }],
+            start_line: 0, baseline_offset_mm: 0., legacy_baseline: 1., legacy_percent: 100., legacy_seed: 1,
+            centerline: false, options: Default::default(), width_mm: 210., height_mm: 297., space_mm: None,
+            auto_baseline: auto, stroke_variation: None, stroke_tip: None, jitter: Default::default(), rules: None, paragraph: Default::default(),
+        };
+        let bottom = |d: &crate::model::Document| d.strokes[0].iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max) - 20.;
+        let off = crate::lined_text::compose(&options(false)).unwrap();
+        assert!((bottom(&off) - 1.5).abs() < 1e-6, "关闭时按 75% 基准线，底部落在横线下 1.5mm");
+        let on = crate::lined_text::compose(&options(true)).unwrap();
+        assert!(bottom(&on).abs() < 1e-6, "开启后墨迹底部正好贴到横线");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

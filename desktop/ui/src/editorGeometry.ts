@@ -12,6 +12,8 @@ export type Drawing = {
   materials?: { id: string; name: string; kind: string }[];
   strokeOwners?: string[];
   strokeIds?: string[];
+  /** 与 strokes 等长：同一数字表示同一个字的笔画（排版文字生成时写入）。 */
+  strokeGroups?: number[];
 };
 export type Bounds = { x: number; y: number; width: number; height: number };
 /** Snap the ink's bottom edge, in paper coordinates, rather than its center or font box. */
@@ -99,6 +101,19 @@ function intersects(a: Point, b: Point, r: Bounds): boolean {
   }
   return true;
 }
+/** 双击选整字：优先按字符分组（排版文字），否则退回“同一次插入”的素材。 */
+export function strokesOfSameOwner(doc: Drawing, index: number): number[] {
+  if (!Number.isInteger(index) || index < 0 || index >= doc.strokes.length) return [];
+  const owner = doc.strokeOwners?.[index];
+  const groups = doc.strokeGroups;
+  if (groups && groups.length === doc.strokes.length) {
+    const group = groups[index];
+    return doc.strokes.flatMap((_, i) =>
+      groups[i] === group && (owner === undefined || doc.strokeOwners?.[i] === owner) ? [i] : []);
+  }
+  if (!owner) return [index];
+  return doc.strokes.flatMap((_, i) => doc.strokeOwners?.[i] === owner ? [i] : []);
+}
 export function selectByRectangle(doc: Drawing, r: Bounds): number[] {
   return doc.strokes.flatMap((s, i) =>
     s.some(
@@ -138,6 +153,33 @@ export function hitStroke(
     }
   });
   return nearest;
+}
+/** 按“字/素材”的外框命中：点在笔画之间的空白处时，返回该字任一笔的下标。
+ *  字号很小时也想双击选字，所以除了包含判断，还允许在外框附近 tolerance*6 内取最近的一个。 */
+export function groupAt(doc: Drawing, p: Point, tolerance = 0): number | null {
+  const groups = doc.strokeGroups;
+  const owners = doc.strokeOwners;
+  const grouped = groups && groups.length === doc.strokes.length;
+  const keyOf = (i: number) => `${owners?.[i] ?? ""}#${grouped ? groups![i] : i}`;
+  const boxes = new Map<string, { index: number; x0: number; y0: number; x1: number; y1: number }>();
+  doc.strokes.forEach((stroke, i) => {
+    if (!stroke.length) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const q of stroke) { x0 = Math.min(x0, q.x); y0 = Math.min(y0, q.y); x1 = Math.max(x1, q.x); y1 = Math.max(y1, q.y); }
+    const key = keyOf(i), box = boxes.get(key);
+    if (box) { box.x0 = Math.min(box.x0, x0); box.y0 = Math.min(box.y0, y0); box.x1 = Math.max(box.x1, x1); box.y1 = Math.max(box.y1, y1); }
+    else boxes.set(key, { index: i, x0, y0, x1, y1 });
+  });
+  let inside: { index: number; area: number } | null = null;
+  let nearest: { index: number; distance: number } | null = null;
+  for (const box of boxes.values()) {
+    const dx = Math.max(box.x0 - p.x, 0, p.x - box.x1), dy = Math.max(box.y0 - p.y, 0, p.y - box.y1);
+    const gap = Math.hypot(dx, dy);
+    const area = Math.max(1e-9, (box.x1 - box.x0) * (box.y1 - box.y0));
+    if (gap <= tolerance && (!inside || area < inside.area)) inside = { index: box.index, area };
+    if (gap <= tolerance * 6 && (!nearest || gap < nearest.distance)) nearest = { index: box.index, distance: gap };
+  }
+  return inside?.index ?? nearest?.index ?? null;
 }
 export function transformPaths(
   doc: Drawing,
@@ -206,7 +248,7 @@ export function rotatePaths(
 }
 export function deletePaths(doc: Drawing, ids: number[]): Drawing {
   const removed = new Set(ids);
-  return { ...doc, strokes: doc.strokes.filter((_, i) => !removed.has(i)), ...(doc.strokeOwners ? { strokeOwners: doc.strokeOwners.filter((_, i) => !removed.has(i)) } : {}), ...(doc.strokeIds ? { strokeIds: doc.strokeIds.filter((_, i) => !removed.has(i)) } : {}) };
+  return { ...doc, strokes: doc.strokes.filter((_, i) => !removed.has(i)), ...(doc.strokeOwners ? { strokeOwners: doc.strokeOwners.filter((_, i) => !removed.has(i)) } : {}), ...(doc.strokeIds ? { strokeIds: doc.strokeIds.filter((_, i) => !removed.has(i)) } : {}), ...(doc.strokeGroups ? { strokeGroups: doc.strokeGroups.filter((_, i) => !removed.has(i)) } : {}) };
 }
 export function copyPaths(doc: Drawing, ids: number[]): Point[][] {
   const selected = new Set(ids);
@@ -235,6 +277,7 @@ export function pastePaths(
           s.map((p) => ({ x: p.x + offset.x, y: p.y + offset.y })),
         ),
       ],
+      ...(doc.strokeGroups ? { strokeGroups: [...doc.strokeGroups, ...clipboard.map(() => 0)] } : {}),
     },
     selection: clipboard.map((_, i) => start + i),
   };

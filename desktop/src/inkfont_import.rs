@@ -212,9 +212,9 @@ mod tests {
             let imported = crate::inkfont::inkfont_import(output.clone()).await.unwrap();
             assert_eq!(imported.variants.len(), 2);
             assert_ne!(imported.id, saved.id);
-            let document = crate::commands::glyph_font_document(output, "见见见".into(), 10., 1., 1, 210., 297., None).await.unwrap();
-            assert_eq!(document.strokes.len(), first.strokes.len() * 3);
-            assert!(document.strokes.iter().flatten().all(|p| p.x.is_finite() && p.y.is_finite()));
+            let document = crate::commands::glyph_font_document(output, "见见见".into(), 10., 1., 1, 210., 297., None, None, None, None).await.unwrap();
+            assert_eq!(document.document.strokes.len(), first.strokes.len() * 3);
+            assert!(document.document.strokes.iter().flatten().all(|p| p.x.is_finite() && p.y.is_finite()));
             crate::inkfont::inkfont_delete(saved.id, saved.revision).unwrap();
             crate::inkfont::inkfont_delete(imported.id, imported.revision).unwrap();
         });

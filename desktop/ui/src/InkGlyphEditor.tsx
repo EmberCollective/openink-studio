@@ -5,7 +5,7 @@ import { boundsOf, transformPaths, type Drawing, type Point } from "./editorGeom
 import { screenToCanvas } from "./pointerGeometry";
 import { DraftNumberInput } from "./DraftNumberInput";
 import Toggle from "./Toggle";
-import { inkCanvas, inkWritingMetrics, variantError, type InkVariant } from "./inkfont";
+import { applyWritingAdvance, inkCanvas, inkWritingMetrics, normalizeGlyphCharacter, variantError, type InkVariant } from "./inkfont";
 
 export function InkGlyphView({ variant, label, writing = false }: { variant: InkVariant; label?: string; writing?: boolean }) {
   const metrics = writing ? { ...inkWritingMetrics(variant), y: 0 } : variant.canvas ?? { x: 0, y: 0, width: variant.width_mm, height: variant.height_mm };
@@ -22,9 +22,10 @@ export function InkConfirm({ title, children, onCancel, onConfirm, confirmText =
   </dialog>;
 }
 
-export function InkGlyphEditor({ variant, packName, onSave, onExit, embedded = false, backgroundUrl, saveLabel = "保存字形", onDraftChange, historyToolbar, locked = false }: {
+export function InkGlyphEditor({ variant, packName, onSave, onExit, embedded = false, backgroundUrl, saveLabel = "保存字形", onDraftChange, historyToolbar, locked = false, reference }: {
   variant: InkVariant; packName: string; onSave: (variant: InkVariant) => Promise<void>; onExit: () => void;
   embedded?: boolean; backgroundUrl?: string; saveLabel?: string; onDraftChange?: (variant: InkVariant) => void; historyToolbar?: ReactNode; locked?: boolean;
+  reference?: InkVariant;
 }) {
   const originalSize = useRef({ width: variant.width_mm, height: variant.height_mm }).current;
   const canvas = useRef(inkCanvas(variant)).current;
@@ -34,6 +35,7 @@ export function InkGlyphEditor({ variant, packName, onSave, onExit, embedded = f
   const [tool, setTool] = useState<"select" | "pen" | "pan">("select"), [zoom, setZoom] = useState(100), [pan, setPan] = useState({ x: 0, y: 0 });
   const [guides, setGuides] = useState(true), [ghost, setGhost] = useState(false), [skew, setSkew] = useState(0);
   const [baseline, setBaseline] = useState(true);
+  const [referenceOn, setReferenceOn] = useState(true);
   const [showBackground, setShowBackground] = useState(true);
   const [ink, setInk] = useState<Point[]>([]), [message, setMessage] = useState(""), [saving, setSaving] = useState(false), [leaving, setLeaving] = useState(false);
   const busy = saving || locked;
@@ -80,7 +82,7 @@ export function InkGlyphEditor({ variant, packName, onSave, onExit, embedded = f
   async function save() {
     if (error || busy) return;
     setSaving(true); setMessage("");
-    try { await onSave(current); } catch (e) { setMessage(String(e)); setSaving(false); setLeaving(false); }
+    try { await onSave(applyWritingAdvance(current)); } catch (e) { setMessage(String(e)); setSaving(false); setLeaving(false); }
   }
   function leave() { if (!busy) dirty ? setLeaving(true) : onExit(); }
   useEffect(() => {
@@ -106,6 +108,9 @@ export function InkGlyphEditor({ variant, packName, onSave, onExit, embedded = f
           {showBackground && backgroundUrl && <image href={backgroundUrl} x="0" y="0" width={originalSize.width} height={originalSize.height} preserveAspectRatio="xMidYMid meet" opacity=".3" pointerEvents="none" />}
           {guides && <g transform={`translate(${paperX} ${paperY})`} stroke="#ded9e8" strokeDasharray="4 4" pointerEvents="none"><path d={`M${drawing.width_mm / 2} 0V${drawing.height_mm}M0 ${drawing.height_mm / 2}H${drawing.width_mm}M0 0L${drawing.width_mm} ${drawing.height_mm}M0 ${drawing.height_mm}L${drawing.width_mm} 0`} fill="none" strokeWidth="1" vectorEffect="non-scaling-stroke" /></g>}
           {baseline && <g aria-label="基准线：字面高度的 75%" pointerEvents="none"><path d={`M${paperX} ${variant.height_mm * .75}H${paperX + paperSize}`} stroke="#a392c6" strokeDasharray="6 3" strokeWidth="1" vectorEffect="non-scaling-stroke" /><text x={paperX - size * .012} y={variant.height_mm * .75} textAnchor="end" dominantBaseline="middle" fill="#817398" fontSize={size * .018}>基准线</text></g>}
+          {referenceOn && (reference
+            ? <g opacity=".3" pointerEvents="none" aria-label="参考字形：同字的其他写法">{reference.strokes.map((stroke, i) => <polyline key={`ref${i}`} points={stroke.map(p => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#8b7d9b" strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />)}</g>
+            : <g pointerEvents="none" aria-label="字面参考框"><rect x={paperX + canvas.width * .1} y={paperY + canvas.height * .1} width={canvas.width * .8} height={canvas.height * .8} fill="none" stroke="#c9c2dc" strokeDasharray="3 4" strokeWidth="1" vectorEffect="non-scaling-stroke" /></g>)}
           {ghost && <g opacity=".18" pointerEvents="none">{variant.strokes.map((s, i) => <polyline key={i} points={s.map(p => `${p.x},${p.y}`).join(" ")} fill="none" stroke="currentColor" strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
           {editor.layer}{tool === "select" && editor.handles}
           {tool !== "select" && <rect x={paperX + canvas.width / 2 - size / 2 + pan.x} y={paperY + canvas.height / 2 - size / 2 + pan.y} width={size} height={size} fill="transparent" style={{ touchAction: "none", cursor: tool === "pen" ? "crosshair" : "grab" }} onPointerDown={down} onPointerMove={move} onPointerUp={end} onPointerCancel={cancel} onLostPointerCapture={cancel} />}
@@ -113,11 +118,11 @@ export function InkGlyphEditor({ variant, packName, onSave, onExit, embedded = f
         </svg></div>
         <footer className="ink-canvas-footer">{historyToolbar === undefined ? editor.historyToolbar : historyToolbar}<span>{editor.selection.length ? `已选 ${editor.selection.length} 条` : `共 ${drawing.strokes.length} 条`}</span><div className="ink-tools"><button className="icon-button" aria-label="缩小画布" onClick={() => setZoom(z => Math.max(25, z - 25))}><ZoomOut size={16} /></button><button className="button" onClick={() => { setZoom(100); setPan({ x: 0, y: 0 }); }}>{zoom}%</button><button className="icon-button" aria-label="放大画布" onClick={() => setZoom(z => Math.min(400, z + 25))}><ZoomIn size={16} /></button></div></footer>
       </section>
-      <aside className="section ink-properties"><h3>字形属性</h3><label>对应字符<input className="text-input" aria-label="编辑字形对应字符" value={character} disabled={busy} onChange={e => setCharacter(e.target.value)} /></label><p className="field-note">修改只作用于当前字形，同字的其他写法保留。</p>
+      <aside className="section ink-properties"><h3>字形属性</h3><label>对应字符<input className="text-input" aria-label="编辑字形对应字符" value={character} disabled={busy} onChange={e => setCharacter(normalizeGlyphCharacter(e.target.value))} /></label><p className="field-note">修改只作用于当前字形，同字的其他写法保留。</p>
         <p className="field-note">书写保留字形大小和上下位置。字间距在排版设置中调整；基准线位于字面高度的 75%。</p>
         {editor.inspector || <p className="field-note">先点击或框选笔迹，再拖动、缩放、旋转；可全选后整体变形。</p>}
         <label>倾斜（°）<DraftNumberInput className="text-input" type="number" value={skew} min={-60} max={60} disabled={busy || !editor.selection.length} onChange={e => setSkew(Number(e.target.value))} /></label><button className="button" disabled={busy || !editor.selection.length || skew === 0} onClick={shear}>应用倾斜</button>
-        <Toggle label="显示字面辅助线" checked={guides} onChange={setGuides} /><Toggle label="显示基准线（75% 高度）" checked={baseline} onChange={setBaseline} /><Toggle label="对照原始字形" checked={ghost} onChange={setGhost} />
+        <Toggle label="显示字面辅助线" checked={guides} onChange={setGuides} /><Toggle label="显示基准线（75% 高度）" checked={baseline} onChange={setBaseline} /><Toggle label={reference ? "显示参考字形（同字其他写法）" : "显示字面参考框"} checked={referenceOn} onChange={setReferenceOn} /><Toggle label="对照原始字形" checked={ghost} onChange={setGhost} />
         {backgroundUrl && <Toggle label="叠加原始切片" checked={showBackground} onChange={setShowBackground} />}
         <p className="field-note">选择画笔后，按住拖动新增笔画，松开结束。新增笔画同样可以选择、变形、删除与撤销。</p>
         {error && <p className="ink-error">{error}</p>}<p className="field-note" role="status">{message}</p>

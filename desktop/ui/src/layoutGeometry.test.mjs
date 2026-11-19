@@ -8,7 +8,7 @@ const code = ts.transpileModule(readFileSync(new URL("./layoutGeometry.ts", impo
 const geometry = {};
 new Function("exports", ts.transpileModule(readFileSync(new URL("./coordinateGeometry.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText)(geometry);
 new Function("exports", "require", code)(api, () => geometry);
-const { applyScaleToPages, normalizeLayouts, applyLayoutToPages } = api;
+const { applyScaleToPages, normalizeLayouts, applyLayoutToPages, virtualTextGuides } = api;
 const layout = { id: "layout-1", name: "PDF", description: "", width_mm: 200, height_mm: 300, margin_mm: 10, font_size_mm: 10, letter_spacing_mm: 1, lines: 12, source: "pdf" };
 const page = (width = 200, height = 300) => ({ document: { name: "字迹", width_mm: width, height_mm: height, strokes: [[{ x: 10, y: 20 }, { x: 40, y: 50 }]] }, background: null });
 
@@ -89,4 +89,32 @@ test("boundary and malformed background rejection is atomic and identifies pages
   assert.equal(applyLayoutToPages(pages, layout, [0, 1])[1].background.width_mm, 200, "legacy target-size copies are ignored");
   pages[1].background.guide_lines = [{ id: "line-1", start: [10, 20], end: [210, 20] }];
   assert.throws(() => applyLayoutToPages(pages, layout, [0, 1]), /第 2 页.*横线/);
+});
+
+test("space width travels with the layout and rejects impossible values", () => {
+  const pages = [{ ...page(), layout_id: layout.id }];
+  pages[0].document.text_settings = { text: "a b", font_mode: "glyph", font_path: "", glyph_path: "", legacy_selection: [], legacy_percent: 100, legacy_baseline: 1, legacy_seed: 1, centerline: false, placement: "lines", start_line: 0, offset: 0, font_size_mm: 10, letter_spacing_mm: 1, space_mm: 3.5 };
+  const kept = applyLayoutToPages(pages, { ...layout, space_mm: 3.5 }, [0]);
+  assert.equal(kept[0].document.text_settings.space_mm, 3.5);
+  const cleared = applyLayoutToPages(pages, { ...layout }, [0]);
+  assert.equal("space_mm" in cleared[0].document.text_settings, true, "未设置时不覆盖页面已有值");
+  assert.throws(() => applyLayoutToPages(pages, { ...layout, space_mm: -1 }, [0]), /文字参数/);
+  assert.throws(() => applyLayoutToPages(pages, { ...layout, space_mm: 60 }, [0]), /文字参数/);
+  assert.equal(applyLayoutToPages(pages, { ...layout, space_mm: 0 }, [0])[0].document.text_settings.space_mm, 0);
+});
+
+test('virtual guides fill the layout evenly and honour an explicit line gap', () => {
+  const template = { width_mm: 210, height_mm: 297, margin_mm: 15, font_size_mm: 7.5, lines: 18 };
+  const auto = virtualTextGuides(template, null);
+  assert.equal(auto.length, 18);
+  assert.deepEqual(auto[0].start, [15, 22.5]);
+  assert.equal(auto[0].end[0], 195);
+  for (let i = 1; i < auto.length; i++) {
+    const gap = auto[i].start[1] - auto[i - 1].start[1];
+    assert.ok(Math.abs(gap - (auto[1].start[1] - auto[0].start[1])) < 1e-9, "等距");
+  }
+  const tight = virtualTextGuides(template, 10);
+  assert.equal(tight.length, 15);
+  assert.ok(Math.abs((tight[1].start[1] - tight[0].start[1]) - 17.5) < 1e-9);
+  assert.ok(tight.at(-1).start[1] <= 297 - 15, "末行不越出下边距");
 });

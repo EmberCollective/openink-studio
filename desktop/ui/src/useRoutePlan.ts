@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { measureRoute } from "./routeMetrics.ts";
 export type RoutePoint = { x: number; y: number };
-export type RouteDocument = { name: string; width_mm: number; height_mm: number; strokes: RoutePoint[][]; materials?: { id: string; name: string; kind: string }[]; strokeOwners?: string[] };
+export type RouteDocument = { name: string; width_mm: number; height_mm: number; strokes: RoutePoint[][]; materials?: { id: string; name: string; kind: string }[]; strokeOwners?: string[]; strokeGroups?: number[] };
 export type RouteRequest = { document: RouteDocument; start: RoutePoint | null; allow_reverse: boolean; travel_feed_mm_min: number; optimize?: boolean; metric_matrix?: [number, number, number, number] };
 export type RouteResult = { document: RouteDocument; stroke_order: number[]; before_distance_mm: number; after_distance_mm: number; before_travel_seconds: number; after_travel_seconds: number };
 export type RouteSnapshot = RouteResult & { key: string; start: RoutePoint | null };
@@ -29,7 +29,7 @@ export function createRoutePlanner(compute: (request: RouteRequest) => Promise<R
         const after = measureRoute(result.document, request.start, request.metric_matrix).travel;
         result = { ...result, before_distance_mm: before, after_distance_mm: after, before_travel_seconds: before / request.travel_feed_mm_min * 60, after_travel_seconds: after / request.travel_feed_mm_min * 60 };
       }
-      return { ...result, document: { ...result.document, materials: request.document.materials, strokeOwners: result.stroke_order.map((i) => request.document.strokeOwners?.[i] || "") }, key, start: request.start };
+      return { ...result, document: { ...result.document, materials: request.document.materials, strokeOwners: result.stroke_order.map((i) => request.document.strokeOwners?.[i] || ""), ...(request.document.strokeGroups ? { strokeGroups: result.stroke_order.map((i) => request.document.strokeGroups![i] ?? 0) } : {}) }, key, start: request.start };
     });
     pending.set(key, result);
     result.catch(() => pending.delete(key));

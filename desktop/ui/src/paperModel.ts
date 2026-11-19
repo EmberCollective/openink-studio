@@ -5,8 +5,11 @@ export function guideLineNumber(line: GuideLine, index: number): number {
   const number = match ? Number(match[1]) : NaN;
   return Number.isSafeInteger(number) ? number : index + 1;
 }
+/** 空格宽度：未设置时按字号折算，须与 Rust `model::SPACE_ADVANCE_EM` 保持一致。 */
+export const DEFAULT_SPACE_EM = 0.22;
 export type TextSettings = {
   line_gap_mm?: number;
+  space_mm?: number;
   paragraph_indent?: boolean;
   indent_chars?: number;
   alignment?: "left" | "center" | "right" | "justify";
@@ -23,6 +26,7 @@ export function validTextSettings(value: unknown): value is TextSettings {
   const jitterRange = (min: number | undefined, max: number, limit: number) => range(min ?? -max, -limit, limit) && range(max, -limit, limit) && (min ?? -max) <= max;
   return (v.font_rules === undefined || validRuleLibrary(v.font_rules)) && typeof v.text === "string" && v.text.length <= 1_000_000 && ["regular", "glyph", "legacy"].includes(v.font_mode)
     && (v.line_gap_mm === undefined || range(v.line_gap_mm, 0, 100))
+    && (v.space_mm === undefined || range(v.space_mm, 0, 50))
     && (v.paragraph_indent === undefined || typeof v.paragraph_indent === "boolean")
     && (v.indent_chars === undefined || (Number.isInteger(v.indent_chars) && range(v.indent_chars, 0, 10)))
     && (v.alignment === undefined || ["left", "center", "right", "justify"].includes(v.alignment))

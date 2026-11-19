@@ -326,9 +326,36 @@ pub fn compose_jittered(
     rows: usize,
     width_mm: f64,
     height_mm: f64,
-    mut jitter: crate::model::TextJitter,
+    jitter: crate::model::TextJitter,
 ) -> Result<Document, String> {
+    compose_jittered_space(path, text, size_mm, spacing_mm, None, rows, width_mm, height_mm, jitter)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compose_jittered_space_groups(
+    path: &Path,
+    text: &str,
+    size_mm: f64,
+    spacing_mm: f64,
+    space_mm: Option<f64>,
+    rows: usize,
+    width_mm: f64,
+    height_mm: f64,
+    mut jitter: crate::model::TextJitter,
+    stroke_variation: Option<f64>,
+    stroke_tip: Option<crate::stroke_tip::TipSettings>,
+) -> Result<(Document, Vec<u32>), String> {
     jitter.validate()?;
+    if let Some(percent) = stroke_variation {
+        if !crate::stroke_variation::valid(percent) {
+            return Err("同字差异强度必须是 0–15% 的有限数值".into());
+        }
+    }
+    if let Some(tip) = &stroke_tip {
+        if !crate::stroke_tip::valid(tip) {
+            return Err("笔锋参数无效：宽度 0.05–2mm、起收锋 0–0.5、样式 outline/taper".into());
+        }
+    }
     if [size_mm, width_mm, height_mm]
         .iter()
         .any(|v| !v.is_finite() || *v <= 0.)
@@ -347,25 +374,32 @@ pub fn compose_jittered(
     let font = load(path)?;
     let mut random = crate::inkfont::Random::new();
     let mut strokes = vec![];
+    // 每个字符一个分组，供前端双击选整字。
+    let mut groups: Vec<u32> = vec![];
+    let mut group = 0u32;
     let mut x = 0.;
     let mut row = 0usize;
     let mut points = 0usize;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
+    let all: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    // 英文单词整体换行：记录当前行内单词起点，放不下时回退整词到下一行。
+    // 中文等连续非 ASCII 文本没有词边界，仍逐字换行；超长单词只搬一次。
+    struct WordState { start: usize, x: f64, row: usize, strokes: usize, points: usize }
+    let mut word: Option<WordState> = None;
+    let mut moved: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    while index < all.len() {
+        let ch = all[index];
         if ch == '\r' {
-            if chars.peek() == Some(&'\n') {
-                continue;
-            } else {
-                return Err("Use newline (LF or CRLF) for line breaks".into());
-            }
+            if all.get(index + 1) == Some(&'\n') { index += 1; continue; }
+            else { return Err("Use newline (LF or CRLF) for line breaks".into()); }
         }
         if ch == '\n' {
-            row += 1;
-            x = 0.;
-            if row >= rows {
-                return Err("Text exceeds configured row count".into());
-            }
+            row += 1; x = 0.; word = None; moved.clear(); index += 1;
+            if row >= rows { return Err("Text exceeds configured row count".into()); }
             continue;
+        }
+        if ch.is_ascii() && !ch.is_ascii_whitespace() && word.is_none() {
+            word = Some(WordState { start: index, x, row, strokes: strokes.len(), points });
         }
         let glyph =
             if ch.is_whitespace() {
@@ -375,16 +409,32 @@ pub fn compose_jittered(
                     format!("Stroke font lacks character {ch} (U+{:04X})", ch as u32)
                 })?)
             };
-        let advance = glyph.map_or(size_mm * 0.5, |g| g.advance_mm * size_mm / g.height_mm);
+        let advance = glyph.map_or(crate::model::space_advance(ch, size_mm, space_mm), |g| g.advance_mm * size_mm / g.height_mm);
         let ink_width = glyph.map_or(advance, |g| g.width_mm * size_mm / g.height_mm);
         let needed = advance.max(ink_width);
         if needed > width_mm {
             return Err(format!("Character {ch} is wider than the page"));
         }
+        let (mut rewound, mut skipped) = (false, false);
         if x > 0. && x + needed > width_mm {
-            x = 0.;
-            row += 1;
+            if ch.is_whitespace() && glyph.is_none() {
+                x = 0.; row += 1; word = None; skipped = true;
+            } else {
+                let can_move = word.as_ref().is_some_and(|w| w.start < index && w.x > 1e-7 && !moved.contains(&w.start));
+                if can_move {
+                    let w = word.take().unwrap();
+                    moved.insert(w.start);
+                    strokes.truncate(w.strokes); points = w.points;
+                    row = w.row + 1; x = 0.;
+                    index = w.start;
+                    rewound = true;
+                } else {
+                    x = 0.; row += 1; word = None;
+                }
+            }
         }
+        if rewound { continue; }
+        if skipped { index += 1; continue; }
         let y = row as f64 * pitch;
         if row >= rows || y + size_mm > height_mm {
             return Err(
@@ -393,34 +443,62 @@ pub fn compose_jittered(
         }
         let first_stroke = strokes.len();
         if let Some(g) = glyph {
+            group = group.wrapping_add(1);
             let scale = size_mm / g.height_mm;
-            for line in &g.strokes {
+            // 先统一缩放到 mm 字身坐标，再逐笔画做微差异与笔锋；
+            // 这样两种变换都用毫米单位，放置时只需平移。
+            let mut body: Vec<Stroke> = g.strokes.iter()
+                .map(|s| s.iter().map(|p| Point { x: p.x * scale, y: p.y * scale }).collect())
+                .collect();
+            if let Some(percent) = stroke_variation.filter(|v| *v > 0.) {
+                crate::stroke_variation::vary_strokes(&mut body, percent, &mut random);
+            }
+            if let Some(tip) = &stroke_tip {
+                crate::stroke_tip::apply_tips(&mut body, tip);
+            }
+            for line in &body {
                 points += line.len();
                 if points > 2_000_000 {
                     return Err("Composed text exceeds two million points".into());
                 }
                 strokes.push(
                     line.iter()
-                        .map(|p| Point {
-                            x: x + p.x * scale,
-                            y: y + p.y * scale,
-                        })
+                        .map(|p| Point { x: x + p.x, y: y + p.y })
                         .collect(),
                 );
+                groups.push(group);
             }
         }
         jitter.apply(&mut strokes[first_stroke..]);
         x += advance + spacing_mm;
+        if !ch.is_ascii() || ch.is_ascii_whitespace() { word = None; }
+        index += 1;
     }
     if strokes.is_empty() {
         return Err("Text contains no drawable glyphs".into());
     }
-    Ok(Document {
+    Ok((Document {
         name: format!("{} — stroke font text", font.name),
         width_mm,
         height_mm,
         strokes,
-    })
+    }, groups))
+}
+
+/// 兼容旧调用：只取文档，丢弃字符分组。
+pub fn compose_jittered_space(
+    path: &Path,
+    text: &str,
+    size_mm: f64,
+    spacing_mm: f64,
+    space_mm: Option<f64>,
+    rows: usize,
+    width_mm: f64,
+    height_mm: f64,
+    jitter: crate::model::TextJitter,
+) -> Result<Document, String> {
+    compose_jittered_space_groups(path, text, size_mm, spacing_mm, space_mm, rows, width_mm, height_mm, jitter, None, None)
+        .map(|(document, _)| document)
 }
 
 #[cfg(test)]

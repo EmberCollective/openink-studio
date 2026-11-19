@@ -13,6 +13,9 @@ pub struct Template {
     pub font_size_mm: f64,
     pub letter_spacing_mm: f64,
     pub lines: usize,
+    /// 空格宽度（毫米）；缺省时由前端按字号折算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_mm: Option<f64>,
 }
 
 pub trait TemplateProvider {
@@ -103,6 +106,7 @@ impl TemplateProvider for TemplateStore {
                 font_size_mm: 7.5,
                 letter_spacing_mm: 1.,
                 lines: 18,
+                space_mm: None,
             },
             Template {
                 id: "builtin-square".into(),
@@ -114,6 +118,7 @@ impl TemplateProvider for TemplateStore {
                 font_size_mm: 10.,
                 letter_spacing_mm: 1.,
                 lines: 15,
+                space_mm: None,
             },
             Template {
                 id: "builtin-a4".into(),
@@ -125,6 +130,7 @@ impl TemplateProvider for TemplateStore {
                 font_size_mm: 7.5,
                 letter_spacing_mm: 1.,
                 lines: 24,
+                space_mm: None,
             },
         ];
         if self.directory.exists() {

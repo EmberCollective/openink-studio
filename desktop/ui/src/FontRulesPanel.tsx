@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DraftNumberInput } from "./DraftNumberInput";
 import Toggle from "./Toggle";
-import { Trash2, X } from "lucide-react";
+import { Download, Trash2, Upload, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { boundsOf } from "./editorGeometry";
-import { newFontRule, rangeFields, ruleError, scalarFields, type CharacterRule, type FontRule, type FontRuleLibrary } from "./fontRules";
+import { newFontRule, rangeFields, ruleError, scalarFields, validRuleLibrary, type CharacterRule, type FontRule, type FontRuleLibrary } from "./fontRules";
 
 type RulePreview = { document: { width_mm: number; height_mm: number; strokes: { x: number; y: number }[][] }; guides: { start: [number, number]; end: [number, number] }[] };
 export function FontRulesPanel({ library, locked, onSave, onPreview, onClose, fonts = [], initialText = "山川与远方\n落笔皆有回响" }: { library: FontRuleLibrary; locked: boolean; onSave: (value: FontRuleLibrary) => void; onPreview: (rule: FontRule, seed: number, sample: { font: string; text: string }) => Promise<RulePreview>; onClose: () => void; fonts?: { id: string; name: string }[]; initialText?: string }) {
@@ -15,6 +17,7 @@ export function FontRulesPanel({ library, locked, onSave, onPreview, onClose, fo
   const [preview, setPreview] = useState<RulePreview | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false), [previewError, setPreviewError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [ioMessage, setIoMessage] = useState(""), [ioFailed, setIoFailed] = useState(false), [ioBusy, setIoBusy] = useState(false);
   const seed = useRef(crypto.getRandomValues(new Uint32Array(1))[0]);
   const version = useRef(0), inFlight = useRef(false);
   const queued = useRef<{ version: number; rule: FontRule; sample: { font: string; text: string } } | null>(null);
@@ -61,6 +64,34 @@ export function FontRulesPanel({ library, locked, onSave, onPreview, onClose, fo
     const rules = library.rules.filter(r => r.id !== rule.id).concat(rule);
     if (rules.length > 50) return;
     onSave({ rules, selected: rule.id }); onClose();
+  }
+  async function exportLibrary() {
+    if (locked || ioBusy) return;
+    setIoBusy(true); setIoMessage(""); setIoFailed(false);
+    try {
+      const path = await saveDialog({ defaultPath: "字体规则.json", filters: [{ name: "字体规则 JSON", extensions: ["json"] }] });
+      if (!path) return;
+      await invoke("export_font_rules", { path, library });
+      setIoMessage(`已导出 ${library.rules.length} 套规则到本机`);
+    } catch (e) { setIoFailed(true); setIoMessage(String(e)); }
+    finally { setIoBusy(false); }
+  }
+  async function importLibrary() {
+    if (locked || ioBusy) return;
+    setIoBusy(true); setIoMessage(""); setIoFailed(false);
+    try {
+      const picked = await openDialog({ multiple: false, filters: [{ name: "字体规则 JSON", extensions: ["json"] }] });
+      if (typeof picked !== "string") return;
+      const value = await invoke<FontRuleLibrary>("import_font_rules", { path: picked });
+      if (!validRuleLibrary(value)) throw new Error("文件不是有效的字体规则库（rules / selected 结构不符或规则参数越界）");
+      const merged: FontRuleLibrary = {
+        rules: [...value.rules, ...library.rules.filter(r => !value.rules.some(v => v.id === r.id))].slice(0, 50),
+        selected: value.selected || library.selected || value.rules[0]?.id || "",
+      };
+      onSave(merged); onClose();
+      setIoMessage(`已导入 ${value.rules.length} 套规则`);
+    } catch (e) { setIoFailed(true); setIoMessage(String(e)); }
+    finally { setIoBusy(false); }
   }
   return <dialog ref={dialog} className="font-rules-dialog" aria-labelledby="font-rules-title" onCancel={onClose}>
     <header><div><h2 id="font-rules-title">字体规则</h2><p className="field-note">保存后用于主界面左侧选中的规则集，仅影响后续插入。</p></div><button className="icon-button" aria-label="关闭字体规则" title="关闭，不保存修改" onClick={onClose}><X size={20} /></button></header>
@@ -109,6 +140,8 @@ export function FontRulesPanel({ library, locked, onSave, onPreview, onClose, fo
         <p className="field-note">等比显示文字区域，虚线为基准线。修改参数自动更新，预览固定随机样本便于比较；不插入画布。</p>
       </section>
     </div>
+    <div className="modal-actions"><button className="button" disabled={locked || ioBusy} onClick={() => void exportLibrary()}><Download size={15} />导出规则 JSON</button><button className="button" disabled={locked || ioBusy} onClick={() => void importLibrary()}><Upload size={15} />导入规则 JSON</button></div>
+    {ioMessage && <p className={ioFailed ? "inline-error" : "field-note"} role="status">{ioMessage}</p>}
     <footer><button className="button" disabled={!!error || locked || library.rules.length >= 50} onClick={() => save(true)}>另存为新规则集</button><button className="button primary" disabled={!!error || locked || (library.rules.length >= 50 && !library.rules.some(r => r.id === draft.id))} onClick={() => save(false)}>保存并使用</button></footer>
   </dialog>;
 }

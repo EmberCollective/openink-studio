@@ -22,10 +22,17 @@ export function ruleError(rule: FontRule): string {
   const interval = (v: unknown, min: number, max: number) => Array.isArray(v) && v.length === 2 && v.every(n => Number.isFinite(n) && n >= min && n <= max) && v[0] <= v[1];
   const settings = (v: CharacterRule) => !!v && typeof v === "object" && Object.keys(v).every(k => [...rangeFields.map(f => f[0]), ...scalarFields.map(f => f[0])].includes(k as never)) && rangeFields.every(([key, , , min, max]) => v[key] === undefined || interval(v[key], min, max)) && scalarFields.every(([key, , min]) => v[key] === undefined || (Number.isFinite(v[key]) && v[key]! >= min && v[key]! <= 20));
   if (!settings(rule.general) || !Array.isArray(rule.overrides) || rule.overrides.length > 100) return "通用规则范围或字符规则数量无效";
-  const seen = new Set<string>();
-  for (const item of rule.overrides) {
+  const seen = new Map<string, number>();
+  for (const [index, item] of rule.overrides.entries()) {
     if (!item || typeof item.characters !== "string" || !item.characters || [...item.characters].length > 500 || !settings(item.settings)) return "请填写适用字符并检查范围";
-    for (const ch of item.characters) { if (seen.has(ch) || /[\u0000-\u001f\u007f-\u009f]/u.test(ch)) return "字符重复或包含换行，请检查字符规则"; seen.add(ch); }
+    for (const ch of item.characters) {
+      if (/[\u0000-\u001f\u007f-\u009f]/u.test(ch)) return `第 ${index + 1} 组字符规则里含有换行或其他控制字符，请删掉后再保存`;
+      const previous = seen.get(ch);
+      if (previous !== undefined) return previous === index
+        ? `第 ${index + 1} 组字符规则里「${ch}」出现了多次，请只保留一次`
+        : `字符「${ch}」重复：第 ${previous + 1} 组和第 ${index + 1} 组都包含它，请只保留一处`;
+      seen.set(ch, index);
+    }
   }
   return interval(rule.first_offset, 0, 20) && interval(rule.wave_amplitude, 0, 20) && interval(rule.wave_length, 1, 500) ? "" : "整行设置范围无效；下限不能大于上限";
 }

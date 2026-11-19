@@ -19,6 +19,19 @@ test("saved rules reject duplicate characters, invalid ranges, unknown fields an
   assert.notEqual(api.ruleError({ ...rule, overrides: [{ characters: "AA", settings: {} }] }), "");
 });
 
+test("duplicate characters name the character and both rule positions", () => {
+  const rule = { ...api.newFontRule("one"), overrides: [
+    { characters: "W", settings: {} },
+    { characters: "QWERTY", settings: {} },
+  ] };
+  const message = api.ruleError(rule);
+  assert.match(message, /字符「W」重复/);
+  assert.match(message, /第 1 组/);
+  assert.match(message, /第 2 组/);
+  const newline = { ...api.newFontRule("one"), overrides: [{ characters: "A\nB", settings: {} }] };
+  assert.match(api.ruleError(newline), /换行/);
+});
+
 test("negative side bearings persist with strict bounds", () => {
   const rule = { ...api.newFontRule("one"), general: { left: -2, right: -3 }, overrides: [{ characters: "A", settings: { left: -20, right: 20 } }] };
   assert.equal(api.validRuleLibrary({ rules: [rule], selected: "one" }), true);

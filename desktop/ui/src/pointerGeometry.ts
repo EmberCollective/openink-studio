@@ -4,6 +4,14 @@ export function rotatedViewSize(width: number, height: number, degrees: number) 
   const angle = degrees * Math.PI / 180, c = Math.abs(Math.cos(angle)), s = Math.abs(Math.sin(angle));
   return { width: width * c + height * s, height: width * s + height * c };
 }
+/**
+ * 编辑视图角度与纸张摆放角度解耦：
+ * 摆放角度（`paperAngle`）决定机器坐标映射，编辑时把画布转正只影响显示与鼠标操作。
+ * 纸面定位向导依赖画布与摆放一致，此时不转正。
+ */
+export function editingViewAngle(paperAngle: number, straighten: boolean, inWizard = false): number {
+  return straighten && !inWizard ? 0 : paperAngle;
+}
 export function referenceViewSize(width: number, height: number, angle = 0, follow = false) {
   const paper = rotatedViewSize(width, height, angle);
   // A small screen-space gap keeps the decorative reference from dictating paper zoom.

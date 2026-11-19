@@ -1,8 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inkCanvas, inkWritingMetrics, newInkPackage, newInkVariant, previewInkText, replaceVariant, variantError } from "./inkfont.ts";
+import { applyWritingAdvance, inkCanvas, inkWritingMetrics, newInkPackage, newInkVariant, normalizeGlyphCharacter, previewInkText, replaceVariant, variantError } from "./inkfont.ts";
 
 const glyph = (character, x = 1) => ({ ...newInkVariant(character), strokes: [[{ x, y: 1 }, { x: x + 1, y: 2 }]] });
+test("ellipsis input collapses to a single … character", () => {
+  assert.equal(normalizeGlyphCharacter("..."), "…");
+  assert.equal(normalizeGlyphCharacter("。。。"), "…");
+  assert.equal(normalizeGlyphCharacter("……"), "…");
+  assert.equal(normalizeGlyphCharacter("…"), "…");
+  assert.equal(normalizeGlyphCharacter("、"), "、");
+  assert.equal(normalizeGlyphCharacter("ab"), "ab");
+});
+test("saving an untouched default glyph pulls ink to the pen origin and shrinks the advance", () => {
+  const slash = { ...newInkVariant("/"), strokes: [[{ x: 8.2, y: 7.6 }, { x: 11.4, y: 15 }]] };
+  const saved = applyWritingAdvance(slash);
+  assert.equal(saved.advance_mm, 11.4 - 8.2 + 0.5);
+  assert.equal(saved.strokes[0][0].x, 0.1);
+  assert.equal(saved.width_mm, 20, "字面宽保持不变");
+  const manual = { ...slash, advance_mm: 5 };
+  assert.deepEqual(applyWritingAdvance(manual), manual, "手动调过的字距不再改动");
+  const empty = { ...newInkVariant("空"), strokes: [] };
+  assert.deepEqual(applyWritingAdvance(empty), empty);
+});
 test("saved canvas accepts its whole area independently of original writing dimensions", () => {
   const narrow = { ...glyph('"'), width_mm: 3, height_mm: 20, advance_mm: 3 };
   const canvas = inkCanvas(narrow);

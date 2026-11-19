@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { Download, FilePlus2, FolderOpen, PenTool, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowDownToLine, Download, FilePlus2, FolderOpen, PenTool, Plus, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import { InkConfirm, InkGlyphEditor, InkGlyphView } from "./InkGlyphEditor";
-import { inkfontDelete, inkfontExport, inkfontImport, inkfontList, inkfontLoad, inkfontSave, newInkPackage, newInkVariant, previewInkText, replaceVariant, type InkPackage, type InkSummary, type InkVariant } from "./inkfont";
+import { inkfontDelete, inkfontExport, inkfontImport, inkfontList, inkfontLoad, inkfontNormalizeBaseline, inkfontSave, newInkPackage, newInkVariant, previewInkText, replaceVariant, type InkPackage, type InkSummary, type InkVariant } from "./inkfont";
 import "./inkfont.css";
 
 export function InkFontManager({ onClose, onChanged, renderImport, initialPackageId, privateGfont = false }: { onClose: () => void; onChanged: () => void; renderImport: (pack: InkPackage, onSaved: (pack: InkPackage) => void, onCancel: () => void) => ReactNode; initialPackageId?: string; privateGfont?: boolean }) {
@@ -79,14 +79,23 @@ export function InkFontManager({ onClose, onChanged, renderImport, initialPackag
     await work("刷新字包", async () => setPackages(await inkfontList()));
   }
   return <dialog ref={dialog} className="modal inkfont-dialog" aria-label="OpenInk 字库管理" onCancel={e => { e.preventDefault(); if (!busy && !editor && !importing) onClose(); }}>
-    {editor && pack ? <InkGlyphEditor key={editor.id} variant={editor} packName={pack.name} onExit={() => setEditor(null)} onSave={async v => { const next = await persist(replaceVariant(pack, v)); setEditor(null); setCharacter(v.character); setNotice(`「${v.character}」已保存，共 ${next.variants.filter(g => g.character === v.character).length} 种写法。`); }} />
+    {editor && pack ? <InkGlyphEditor key={editor.id} variant={editor} packName={pack.name} reference={pack.variants.find(v => v.id !== editor.id && v.character === editor.character)} onExit={() => setEditor(null)} onSave={async v => { const next = await persist(replaceVariant(pack, v)); setEditor(null); setCharacter(v.character); setNotice(`「${v.character}」已保存，共 ${next.variants.filter(g => g.character === v.character).length} 种写法。`); }} />
       : importing && pack ? renderImport(pack, next => void savedImport(next), () => setImporting(false))
       : <div className="ink-manager">
         <header className="ink-header"><div><strong>OpenInk 字库</strong><p className="field-note">一个字包，多种写法 · 本地保存</p></div><div className="ink-tools"><button className="button" disabled={!!busy} onClick={() => void work("刷新字包", () => refresh(pack?.id))}><RefreshCw size={16} />刷新</button><button className="icon-button" aria-label="关闭字库管理" title="关闭" disabled={!!busy} onClick={onClose}><X size={18} /></button></div></header>
         <div className="ink-manager-body">
           <aside className="section ink-packages"><h3>我的字包</h3><button className="button" disabled={!!busy} onClick={() => setNewName("我的手写字包")}><Plus size={16} />新建字包</button><div className="ink-package-list">{packages.map(item => <button key={item.id} className="button" aria-pressed={pack?.id === item.id} disabled={!!busy} onClick={() => void work("读取字包", async () => select(await inkfontLoad(item.id)))}><FolderOpen size={18} /><span>{item.name}<small>{item.characters.length} 字 · {item.variant_count} 字形</small></span></button>)}</div><button className="button" disabled={!!busy} onClick={() => void work("导入字包", importFile)}><Upload size={16} />{privateGfont ? "导入 .inkfont / .gfont" : "导入 .inkfont"}</button><p className="field-note">字包包含全部写法和可编辑笔迹，可导出备份。</p></aside>
           <main className="ink-main">{pack ? <>
-            <div className="ink-package-heading"><div><h2>{pack.name} <small>.inkfont</small></h2><p className="field-note">{characters.length} 个字符 · {pack.variants.length} 份字形 · 同字的不同写法共同保留</p></div><div className="ink-tools"><button className="button" disabled={!!busy} onClick={() => void work("导出字包", exportFile)}><Download size={16} />导出字包</button><button className="button danger-icon" title="删除整个字包" aria-label="删除整个字包" disabled={!!busy} onClick={() => setConfirm({ title: `删除字包「${pack.name}」？`, detail: `将删除本机此字包的全部 ${pack.variants.length} 个字形。请先导出备份；已有画布笔迹保留。`, action: async () => { await inkfontDelete(pack.id, pack.revision); onChanged(); await refresh(); } })}><Trash2 size={16} />删除字包</button><button className="button primary" disabled={!!busy} onClick={() => setImporting(true)}><FilePlus2 size={16} />向此字包新增</button></div></div>
+            <div className="ink-package-heading"><div><h2>{pack.name} <small>.inkfont</small></h2><p className="field-note">{characters.length} 个字符 · {pack.variants.length} 份字形 · 同字的不同写法共同保留</p></div><div className="ink-tools"><button className="button" disabled={!!busy} onClick={() => void work("导出字包", exportFile)}><Download size={16} />导出字包</button><button className="button" disabled={!!busy} title="把字形底部统一到字面高度 75% 的基准线" onClick={() => setConfirm({
+              title: `把「${pack.name}」统一到基准线？`,
+              detail: `普通字形的底部会对齐到基准线（字面高度 75%），单次平移不超过 3mm。引号、连字符等小符号、g/p/q/y/j 下伸字母，以及位移过大的偏旁部首保持原位。原字包先备份到本机字包目录的 _baseline_backup 中，可随时恢复；已有画布笔迹不受影响。`,
+              action: async () => {
+                const result = await inkfontNormalizeBaseline(pack.id);
+                onChanged();
+                await refresh(pack.id);
+                setNotice(`已对齐 ${result.adjusted}/${result.total} 个字形（平均位移 ${result.mean_shift_mm.toFixed(2)}mm，最大 ${result.max_shift_mm.toFixed(2)}mm），跳过 ${result.skipped} 个特殊字形。备份：${result.backup}`);
+              }
+            })}><ArrowDownToLine size={16} />统一到基准线</button><button className="button danger-icon" title="删除整个字包" aria-label="删除整个字包" disabled={!!busy} onClick={() => setConfirm({ title: `删除字包「${pack.name}」？`, detail: `将删除本机此字包的全部 ${pack.variants.length} 个字形。请先导出备份；已有画布笔迹保留。`, action: async () => { await inkfontDelete(pack.id, pack.revision); onChanged(); await refresh(); } })}><Trash2 size={16} />删除字包</button><button className="button primary" disabled={!!busy} onClick={() => setImporting(true)}><FilePlus2 size={16} />向此字包新增</button></div></div>
             <div className="ink-tabs"><button className="button" aria-pressed={tab === "characters"} onClick={() => setTab("characters")}>字符管理</button><button className="button" aria-pressed={tab === "preview"} onClick={() => setTab("preview")}>随机书写预览</button></div>
             {tab === "characters" ? <div className="ink-character-body">
               <section className="section ink-characters">

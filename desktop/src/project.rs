@@ -89,6 +89,9 @@ pub struct Layout {
     pub id: String, pub name: String, pub description: String,
     pub width_mm: f64, pub height_mm: f64, pub margin_mm: f64,
     pub font_size_mm: f64, pub letter_spacing_mm: f64, pub lines: usize,
+    /// 空格宽度（毫米），可缺省：缺省时由前端按字号折算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_mm: Option<f64>,
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale_x: Option<f64>,
@@ -101,7 +104,7 @@ impl Layout {
     fn template(&self) -> Template {
         Template { id: self.id.clone(), name: self.name.clone(), description: self.description.clone(),
             width_mm: self.width_mm, height_mm: self.height_mm, margin_mm: self.margin_mm,
-            font_size_mm: self.font_size_mm, letter_spacing_mm: self.letter_spacing_mm, lines: self.lines }
+            font_size_mm: self.font_size_mm, letter_spacing_mm: self.letter_spacing_mm, lines: self.lines, space_mm: self.space_mm }
     }
     fn validate(&self) -> Result<(), String> {
         crate::templates::TemplateStore::validate(&self.template())?;
@@ -110,6 +113,9 @@ impl Layout {
             (None, None) => {},
             (Some(x), Some(y)) if [x, y].iter().all(|v| v.is_finite() && (0.1..=10.).contains(v)) => {},
             _ => return Err("工程版面横纵比例必须成对且在 0.1..10 内".into()),
+        }
+        if let Some(w) = self.space_mm {
+            if !w.is_finite() || !(0.0..=50.0).contains(&w) { return Err("工程版面空格宽度必须在 0–50mm 内".into()); }
         }
         if let Some(d) = &self.derivation {
             if !["two", "three"].contains(&d.mode.as_str())
@@ -152,7 +158,7 @@ fn migrate_layouts(project: &mut Project) -> Result<(), String> {
             layouts.push(Layout { id: format!("layout-{}", index + 1), name: t.name.clone(), description: t.description.clone(),
                 width_mm: doc.width_mm, height_mm: doc.height_mm,
                 margin_mm: if t.margin_mm * 2. < doc.width_mm.min(doc.height_mm) { t.margin_mm } else { doc.width_mm.min(doc.height_mm) / 4. },
-                font_size_mm: t.font_size_mm, letter_spacing_mm: t.letter_spacing_mm, lines: t.lines, source: "template".into(), derivation: None, scale_x: None, scale_y: None });
+                font_size_mm: t.font_size_mm, letter_spacing_mm: t.letter_spacing_mm, lines: t.lines, space_mm: None, source: "template".into(), derivation: None, scale_x: None, scale_y: None });
         }
         page.layout_id = Some(layouts[index].id.clone());
     }
@@ -221,7 +227,7 @@ fn validate(project: &Project) -> Result<(), String> {
         if let Some(rules) = page.document.get("text_settings").and_then(|v|v.get("font_rules")) {
             serde_json::from_value::<crate::text_rules::RuleLibrary>(rules.clone()).map_err(|e|format!("字体规则无效：{e}"))?.validate()?;
         }
-        let fields = ["name", "width_mm", "height_mm", "strokes", "materials", "strokeOwners", "strokeIds", "route_optimized", "text_settings", "batches", "strokeBatches", "writtenStrokeIds", "reviewBatchIds"];
+        let fields = ["name", "width_mm", "height_mm", "strokes", "materials", "strokeOwners", "strokeIds", "strokeGroups", "route_optimized", "text_settings", "batches", "strokeBatches", "writtenStrokeIds", "reviewBatchIds"];
         if page.document.as_object().unwrap().keys().any(|k| !fields.contains(&k.as_str())) || page.document.get("route_optimized").is_some_and(|v| !v.is_boolean()) { return Err("工程字迹字段无效".into()); }
         for key in ["strokeIds", "strokeOwners"] {
             if let Some(values) = page.document.get(key) {
@@ -229,6 +235,11 @@ fn validate(project: &Project) -> Result<(), String> {
                 if values.len() != page.document["strokes"].as_array().unwrap().len() || !values.iter().all(Value::is_string) { return Err("字迹标识数量无效".into()); }
                 if key == "strokeIds" && values.iter().map(|v| v.as_str().unwrap()).collect::<HashSet<_>>().len() != values.len() { return Err("笔画标识重复".into()); }
             }
+        }
+        if let Some(values) = page.document.get("strokeGroups") {
+            let values = values.as_array().ok_or("字符分组无效")?;
+            let strokes = page.document["strokes"].as_array().ok_or("字迹标识无效")?;
+            if values.len() != strokes.len() || !values.iter().all(|v| v.as_u64().is_some()) { return Err("字符分组数量无效".into()); }
         }
         validate_batches(&page.document)?;
         if let Some(materials) = page.document.get("materials") {
@@ -449,6 +460,16 @@ mod tests {
         assert!(validate_batches(&doc).is_err());
         assert!(validate_batches(&json!({"strokes":[]})).is_ok());
     }
+    #[test]
+    fn character_groups_are_accepted_and_validated() {
+        let mut project = fixture();
+        project.pages[0].document["strokeGroups"] = json!([1]);
+        assert!(validate(&project).is_ok(), "字符分组应允许保存");
+        project.pages[0].document["strokeGroups"] = json!([1, 2]);
+        assert!(validate(&project).is_err(), "分组数量必须与笔画一致");
+        project.pages[0].document["strokeGroups"] = json!(["x"]);
+        assert!(validate(&project).is_err(), "分组必须是数字");
+    }
     fn fixture() -> Project {
         serde_json::from_value(json!({
             "pages": [{"document":{"name":"editable","width_mm":210,"height_mm":297,
@@ -463,6 +484,22 @@ mod tests {
             "conversion":{"dpi":300,"threshold":180,"conservative":false,"tolerance_mm":0.1,"filter_iterations":4,"error_threshold":2,"line_threshold":1,"despeckle_level":0},
             "background_visible":true,"show_margins":false
         })).unwrap()
+    }
+    #[test]
+    fn space_width_project_saves_and_reopens() {
+        let layout = json!({"id":"a4","name":"A4","description":"","width_mm":210,"height_mm":297,
+            "margin_mm":15,"font_size_mm":25,"letter_spacing_mm":1,"lines":8,
+            "space_mm":2.5,"source":"manual"});
+        let mut value = fixture();
+        value.template.space_mm = Some(2.5);
+        value.layouts = Some(vec![serde_json::from_value(layout).unwrap()]);
+        for page in &mut value.pages { page.layout_id = Some("a4".into()); }
+        let dir = directory(); let path = dir.join("space.inkproj");
+        save_at(&path, value).unwrap();
+        let reopened = open_at(&path).unwrap();
+        assert_eq!(reopened.layouts.as_ref().unwrap()[0].space_mm, Some(2.5));
+        assert_eq!(reopened.template.space_mm, Some(2.5));
+        let _ = fs::remove_dir_all(dir);
     }
     fn directory() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("openink-project-test-{}", nonce()));
@@ -734,5 +771,19 @@ mod tests {
         archive(&path, &files.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice())).collect::<Vec<_>>());
         assert!(open_at(&path).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+
+    #[test]
+    fn layout_space_width_survives_a_project_round_trip_and_defaults_to_absent() {
+        let with: Layout = serde_json::from_str(r#"{"id":"l1","name":"n","description":"","width_mm":100,"height_mm":200,"margin_mm":5,"font_size_mm":10,"letter_spacing_mm":1,"lines":5,"space_mm":2.5,"source":"manual"}"#).unwrap();
+        assert_eq!(with.space_mm, Some(2.5));
+        assert_eq!(with.validate(), Ok(()));
+        let back: Layout = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back.space_mm, Some(2.5));
+        let without: Layout = serde_json::from_str(r#"{"id":"l1","name":"n","description":"","width_mm":100,"height_mm":200,"margin_mm":5,"font_size_mm":10,"letter_spacing_mm":1,"lines":5,"source":"manual"}"#).unwrap();
+        assert_eq!(without.space_mm, None);
+        let bad = serde_json::from_str::<Layout>(r#"{"id":"l1","name":"n","description":"","width_mm":100,"height_mm":200,"margin_mm":5,"font_size_mm":10,"letter_spacing_mm":1,"lines":5,"space_mm":60,"source":"manual"}"#).unwrap();
+        assert!(bad.validate().is_err(), "空格宽度越界应被校验拒绝");
     }
 }

@@ -12,6 +12,22 @@ pub type Stroke = Vec<Point>;
 
 pub const FONT_BASELINE_RATIO: f64 = 0.75;
 
+/// 半角空格相对字号的推进量。常规西文词距约 0.25–0.3 em，但 `.inkfont` 的
+/// `height_mm` 是字身画布（20mm）而不是字身，实际画出的墨迹只有字号的约 55%，
+/// 按 0.25 em 折算到这个字号上仍然明显偏宽；0.22 才是肉眼看过去的常规词距。
+/// 取 0.5 em 会让每个词之间空出近半个字身，整行英文被拆成一段一段。
+pub const SPACE_ADVANCE_EM: f64 = 0.22;
+
+/// 空格的推进量。全角空格（U+3000）固定占满一个字身；其余空白先看用户是否指定了
+/// 空格宽度（毫米），未指定时按 [`SPACE_ADVANCE_EM`] 折算。
+pub fn space_advance(ch: char, size: f64, width_mm: Option<f64>) -> f64 {
+    if ch == '\u{3000}' { return size; }
+    match width_mm {
+        Some(w) if w.is_finite() && w >= 0. => w,
+        _ => size * SPACE_ADVANCE_EM,
+    }
+}
+
 pub fn font_baseline_offset(size: f64, adjustment: f64) -> f64 {
     size * FONT_BASELINE_RATIO * adjustment
 }
@@ -48,6 +64,15 @@ pub struct Document {
     pub width_mm: f64,
     pub height_mm: f64,
     pub strokes: Vec<Stroke>,
+}
+
+/// 排版文字：文档本体 + 每条笔画所属的字符分组（同一组即同一个字）。
+/// 前端用它把「双击选整字」落到单字，而不是整段文字。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextDocument {
+    pub document: Document,
+    #[serde(default)]
+    pub groups: Vec<u32>,
 }
 
 fn mid(a: &Point, b: &Point) -> Point {
@@ -110,5 +135,20 @@ mod font_geometry_tests {
         assert_eq!(font_horizontal_metrics(&[], 1.).advance, 0.);
         assert_eq!(font_baseline_offset(20., 1.), 15.);
         assert_eq!(font_baseline_offset(20., 1.2-1.), 20.*0.75*(1.2-1.));
+    }
+    #[test]
+    fn spaces_take_a_latin_word_gap_and_full_width_spaces_take_one_em() {
+        assert_eq!(space_advance(' ', 12.2, None), 12.2*SPACE_ADVANCE_EM);
+        assert!(space_advance(' ', 12.2, None) < 12.2*0.35, "半角空格不应占半个字身");
+        assert_eq!(space_advance('\u{3000}', 12.2, None), 12.2);
+        assert_eq!(space_advance('\t', 12.2, None), 12.2*SPACE_ADVANCE_EM);
+    }
+    #[test]
+    fn a_document_space_width_overrides_the_default_only_for_plain_whitespace() {
+        assert_eq!(space_advance(' ', 12.2, Some(1.5)), 1.5);
+        assert_eq!(space_advance('\t', 12.2, Some(0.)), 0.);
+        assert_eq!(space_advance('\u{3000}', 12.2, Some(1.5)), 12.2, "全角空格始终一个字身");
+        assert_eq!(space_advance(' ', 12.2, Some(f64::NAN)), 12.2*SPACE_ADVANCE_EM);
+        assert_eq!(space_advance(' ', 12.2, Some(-1.)), 12.2*SPACE_ADVANCE_EM);
     }
 }
